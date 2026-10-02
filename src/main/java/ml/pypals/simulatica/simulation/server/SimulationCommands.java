@@ -168,6 +168,11 @@ public final class SimulationCommands {
     }
 
     public static void execute(String command) {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) {
+            var player = Minecraft.getInstance().player;
+            if (player != null) player.connection.sendCommand(command.startsWith("/") ? command.substring(1) : command);
+            return;
+        }
         String trimmed = command == null ? "" : command.trim();
         String bare = trimmed.startsWith("/") ? trimmed.substring(1) : trimmed;
 

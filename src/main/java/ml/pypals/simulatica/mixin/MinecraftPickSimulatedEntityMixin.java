@@ -35,6 +35,7 @@ public class MinecraftPickSimulatedEntityMixin {
 
     @Inject(method = "pickBlockOrEntity", at = @At("HEAD"), cancellable = true)
     private void simulatica$pickSimulatedEntity(CallbackInfo ci) {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) return;
         Minecraft mc = (Minecraft) (Object) this;
         LocalPlayer player = mc.player;
         if (player == null || DataManager.getToolMode() != SimulaticaClient.SIMULATE) {

@@ -263,9 +263,6 @@ public final class BotManager {
 
     /** 让某投影下所有假人按指定间隔执行动作（负数=长按，0=不动作）。 */
     public static void actionAllInterval(SchematicPlacement placement, String action, int intervalTicks) {
-        if (intervalTicks == 0) {
-            return;
-        }
         for (Bot bot : botsOf(placement)) {
             CarpetIntegration.startInterval(bot.player(), action, intervalTicks);
         }

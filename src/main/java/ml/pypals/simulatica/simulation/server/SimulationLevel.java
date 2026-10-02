@@ -74,6 +74,9 @@ public class SimulationLevel extends ServerLevel {
                            List<CustomSpawner> customSpawners,
                            boolean tickTime) {
         super(server, executor, storage, levelData, dimension, stem, false, seed, customSpawners, tickTime);
+        // Void simulations keep End physics without creating an unrelated dragon arena.
+        // Explicitly summoned or schematic dragons remain normal entities.
+        setDragonFight(null);
     }
 
     private final List<Consumer<BlockPos>> blockEntityChangeListeners = new ArrayList<>();

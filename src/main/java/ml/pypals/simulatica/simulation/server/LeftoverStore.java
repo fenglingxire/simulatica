@@ -40,8 +40,36 @@ import java.util.UUID;
  * loaded back when the region is simulated again. Files are deleted once consumed.</p>
  */
 public final class LeftoverStore {
+    private static final ThreadLocal<String> WORLD_OVERRIDE = new ThreadLocal<>();
 
     private LeftoverStore() {
+    }
+
+    /** Storage identity survives renames and separates equal names, regions and dimensions. */
+    public static String key(fi.dy.masa.litematica.schematic.placement.SchematicPlacement placement, String region) {
+        Minecraft mc = Minecraft.getInstance();
+        String identity = currentWorldKey() + "|" + (mc.level == null ? "" : mc.level.dimension().identifier()) + "|" + region;
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(identity.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return placement.getHashId() + "/" + java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
+    }
+
+    /** Only migrate a legacy name-based save when its owner is unambiguous and unedited. */
+    public static String prepareKey(fi.dy.masa.litematica.schematic.placement.SchematicPlacement placement, String region) {
+        String key = key(placement, region);
+        if (ml.pypals.simulatica.workshop.EditedPlacementCache.hasEdit(placement)) return key;
+        Path legacy = fileFor(placement.getName() + "/" + region), target = fileFor(key);
+        long owners = fi.dy.masa.litematica.data.DataManager.getSchematicPlacementManager().getAllSchematicsPlacements().stream()
+                .filter(other -> other.getSchematic() != null)
+                .flatMap(other -> other.getSchematic().getAreaSizes().keySet().stream()
+                        .map(name -> fileFor(other.getName() + "/" + name)))
+                .filter(path -> java.util.Objects.equals(path, legacy)).count();
+        if (owners == 1 && legacy != null && target != null && Files.exists(legacy) && !Files.exists(target)) {
+            try { Files.move(legacy, target); }
+            catch (IOException failure) { throw new java.io.UncheckedIOException("Cannot migrate leftover entity save", failure); }
+        }
+        return key;
     }
 
     /** Saves the given entities for the region label, replacing any previous save. */
@@ -162,7 +190,17 @@ public final class LeftoverStore {
     }
 
     @Nullable
-    private static Path fileFor(String label) {
+    public static Path fileFor(String label) {
+        String worldKey = WORLD_OVERRIDE.get();
+        if (worldKey == null) worldKey = currentWorldKey();
+        if (worldKey == null || worldKey.isEmpty()) return null;
+        return FabricLoader.getInstance().getGameDir()
+                .resolve(Simulatica.MOD_ID).resolve("leftovers")
+                .resolve(sanitize(worldKey)).resolve(sanitize(label) + ".nbt");
+    }
+
+    @Nullable
+    public static String currentWorldKey() {
         Minecraft client = Minecraft.getInstance();
         String worldKey;
         if (client.getSingleplayerServer() != null) {
@@ -172,9 +210,17 @@ public final class LeftoverStore {
         } else {
             return null;
         }
-        return FabricLoader.getInstance().getGameDir()
-                .resolve(Simulatica.MOD_ID).resolve("leftovers")
-                .resolve(sanitize(worldKey)).resolve(sanitize(label) + ".nbt");
+        return worldKey;
+    }
+
+    /** World switches must finish the original simulation's persistence in its original namespace. */
+    public static void withWorldKey(@Nullable String worldKey, Runnable action) {
+        String previous = WORLD_OVERRIDE.get();
+        WORLD_OVERRIDE.set(worldKey == null ? "" : worldKey);
+        try { action.run(); }
+        finally {
+            if (previous == null) WORLD_OVERRIDE.remove(); else WORLD_OVERRIDE.set(previous);
+        }
     }
 
     private static String sanitize(String name) {

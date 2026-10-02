@@ -59,8 +59,7 @@ final class SimulationBoundary {
         double t = THICKNESS;
 
         // Floor: top surface exactly at the region's bottom face.
-        addShape(out, query, bounds.minX - t, bounds.minY - t, bounds.minZ - t,
-                bounds.maxX + t, bounds.minY, bounds.maxZ + t);
+        addHorizontal(bridges, self, bounds, query, out, true);
 
         addWall(bridges, self, bounds, query, out, Face.WEST);
         addWall(bridges, self, bounds, query, out, Face.EAST);
@@ -68,8 +67,24 @@ final class SimulationBoundary {
         addWall(bridges, self, bounds, query, out, Face.SOUTH);
 
         // Ceiling: seals the top so knockback cannot clear the walls.
-        addShape(out, query, bounds.minX - t, ceilingY(bounds), bounds.minZ - t,
-                bounds.maxX + t, ceilingY(bounds) + t, bounds.maxZ + t);
+        addHorizontal(bridges, self, bounds, query, out, false);
+    }
+
+    /** Floors and caps inside another region in this placement must not divide a machine. */
+    private static void addHorizontal(List<ProjectionBridge> bridges, ProjectionBridge self, AABB b,
+                                      AABB query, List<VoxelShape> out, boolean floor) {
+        double plane = floor ? b.minY : ceilingY(b);
+        List<double[]> rects = new ArrayList<>();
+        rects.add(new double[]{b.minX - THICKNESS, b.minZ - THICKNESS, b.maxX + THICKNESS, b.maxZ + THICKNESS});
+        for (ProjectionBridge other : bridges) {
+            if (other == self || other.level() != self.level()) continue;
+            AABB o = other.region().simBounds();
+            boolean covers = floor ? o.minY < plane && o.maxY >= plane
+                    : o.minY <= plane && ceilingY(o) > plane;
+            if (covers) rects = subtractAll(rects, o.minX, o.minZ, o.maxX, o.maxZ);
+        }
+        for (double[] rect : rects) addShape(out, query, rect[0], floor ? plane - THICKNESS : plane,
+                rect[1], rect[2], floor ? plane : plane + THICKNESS, rect[3]);
     }
 
     private enum Face {

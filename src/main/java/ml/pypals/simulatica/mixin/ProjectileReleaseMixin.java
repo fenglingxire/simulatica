@@ -38,6 +38,7 @@ public class ProjectileReleaseMixin {
 
     @Inject(method = "releaseUsingItem", at = @At("HEAD"), cancellable = true)
     private void simulatica$releaseIntoSimulation(Player player, CallbackInfo ci) {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) return;
         if (!(player instanceof LocalPlayer localPlayer)) {
             return;
         }

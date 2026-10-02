@@ -43,6 +43,7 @@ public final class SimulationRaycast {
 
     @Nullable
     public static Hit traceEntity(Minecraft mc, double maxDistance) {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) return null;
         if (mc.player == null) {
             return null;
         }
@@ -145,6 +146,7 @@ public final class SimulationRaycast {
      */
     @Nullable
     public static SimulationLevel resolveLevel(Minecraft mc) {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) return null;
         if (mc.player == null) {
             return null;
         }

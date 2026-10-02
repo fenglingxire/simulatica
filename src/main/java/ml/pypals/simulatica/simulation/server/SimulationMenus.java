@@ -58,7 +58,7 @@ public final class SimulationMenus {
     }
 
     public static boolean isInteracting() {
-        return interacting;
+        return interacting && !ml.pypals.simulatica.workshop.WorkshopManager.isActive();
     }
 
     public static int containerId() {
@@ -66,7 +66,7 @@ public final class SimulationMenus {
     }
 
     public static boolean isSimulated(@Nullable AbstractContainerMenu menu) {
-        return menu != null && menu == open;
+        return menu != null && menu == open && !ml.pypals.simulatica.workshop.WorkshopManager.isActive();
     }
 
     public static boolean openFor(MenuProvider provider) {

@@ -20,6 +20,7 @@ public abstract class LocalPlayerDropMixin {
 
     @Inject(method = "drop(Z)Z", at = @At("HEAD"), cancellable = true)
     private void simulatica$dropIntoSimulation(boolean dropAll, CallbackInfoReturnable<Boolean> cir) {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) return;
         LocalPlayer self = (LocalPlayer) (Object) this;
         if (DataManager.getToolMode() != SimulaticaClient.SIMULATE) return;
 

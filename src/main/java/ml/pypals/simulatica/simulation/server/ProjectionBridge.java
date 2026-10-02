@@ -74,6 +74,7 @@ public final class ProjectionBridge {
     private final SimulationLevel level;
     private SimulationRegion region;
     private String label;
+    private final String storageKey;
 
     @Nullable
     private SimulationViewer viewer;
@@ -105,10 +106,17 @@ public final class ProjectionBridge {
     private static final double ENTITY_TRACKING_MARGIN = 16.0;
 
     ProjectionBridge(SimulationLevel level, SimulationRegion region, String label) {
+        this(level, region, label, label);
+    }
+
+    ProjectionBridge(SimulationLevel level, SimulationRegion region, String label, String storageKey) {
         this.level = level;
         this.region = region;
         this.label = label;
+        this.storageKey = storageKey;
     }
+
+    public String storageKey() { return storageKey; }
 
     public SimulationRegion region() {
         return this.region;

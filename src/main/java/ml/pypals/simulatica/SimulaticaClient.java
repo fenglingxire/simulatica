@@ -10,9 +10,11 @@ import fi.dy.masa.litematica.tool.ToolMode;
 import ml.pypals.simulatica.simulation.SimulationManager;
 import ml.pypals.simulatica.simulation.server.ProjectionBridge;
 import ml.pypals.simulatica.simulation.server.SimulationRegion;
-import ml.pypals.simulatica.simulation.server.SimulationSelfTest;
 import ml.pypals.simulatica.simulation.server.SimulationCommands;
 import ml.pypals.simulatica.simulation.server.SimulationServer;
+import ml.pypals.simulatica.workshop.WorkshopCommands;
+import ml.pypals.simulatica.workshop.WorkshopManager;
+import ml.pypals.simulatica.workshop.WorkshopSession;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
@@ -77,6 +79,7 @@ public class SimulaticaClient implements ClientModInitializer {
     }
     @Override
     public void onInitializeClient() {
+        ml.pypals.simulatica.config.SimulaticaConfigs.initialize();
         registerTickEvent();
         registerCommands();
         registerShutdown();
@@ -85,14 +88,23 @@ public class SimulaticaClient implements ClientModInitializer {
 
     private void registerShutdown() {
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
-            SimulationManager.getInstance().stopAll();
-            SimulationManager.getInstance().clearLeftovers();
-            ml.pypals.simulatica.carpet.BotManager.clearAll();
-            SimulationServer.shutdown();
+            if (WorkshopSession.handleDisconnect(handler)) return;
+            client.execute(() -> {
+                SimulationManager.getInstance().stopAllForWorldChange();
+                SimulationManager.getInstance().clearLeftovers();
+                ml.pypals.simulatica.carpet.BotManager.clearAll();
+                SimulationServer.shutdown();
+            });
         });
     }
     private void registerTickEvent() {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            try {
+                WorkshopManager.tick();
+            } catch (Throwable exception) {
+                reportTickException(exception);
+            }
+            if (WorkshopManager.isActive()) return;
             // A bare /simulatica asks for the menu; open it once the chat screen has closed.
             if (menuRequested && client.gui.screen() == null) {
                 menuRequested = false;
@@ -137,11 +149,15 @@ public class SimulaticaClient implements ClientModInitializer {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
                 dispatcher.register(ClientCommands.literal("simulatica")
                         .executes(ctx -> {
-                            openMenu();
+                            if (WorkshopManager.isActive()) WorkshopManager.requestReturn();
+                            else openMenu();
                             return 1;
                         })
 
+                        .then(WorkshopCommands.node())
+
                         .then(ClientCommands.literal("start")
+                                .requires(source -> !WorkshopManager.isActive())
                                 .executes(ctx -> {
                                     ctx.getSource().getPlayer();
                                     startAll();
@@ -157,6 +173,7 @@ public class SimulaticaClient implements ClientModInitializer {
                                         }))
                         )
                         .then(ClientCommands.literal("stop")
+                                .requires(source -> !WorkshopManager.isActive())
                                 .executes(ctx -> {
                                     SimulationManager.getInstance().stopAll();
                                     sendFeedback("Stopped all simulations.");
@@ -176,6 +193,7 @@ public class SimulaticaClient implements ClientModInitializer {
                                 })
                         )
                         .then(ClientCommands.literal("tps")
+                                .requires(source -> !WorkshopManager.isActive())
                                 .then(ClientCommands.argument("placement_name", StringArgumentType.string())
                                         .suggests((ctx, builder) -> {
                                             String prefix = builder.getRemainingLowerCase();
@@ -193,6 +211,7 @@ public class SimulaticaClient implements ClientModInitializer {
                                                 .executes(ctx -> tpsByName(StringArgumentType.getString(ctx, "placement_name"),
                                                         IntegerArgumentType.getInteger(ctx, "tps"))))))
                         .then(ClientCommands.literal("absorb")
+                                .requires(source -> !WorkshopManager.isActive())
                                 .executes(ctx -> {
                                     reportAbsorption(SimulationManager.getInstance().setItemAbsorption(null));
                                     return 1;
@@ -209,6 +228,7 @@ public class SimulaticaClient implements ClientModInitializer {
                                         }))
                         )
                         .then(ClientCommands.literal("purge")
+                                .requires(source -> !WorkshopManager.isActive())
                                 .executes(ctx -> {
                                     int removed = SimulationManager.getInstance().purgeEscapedEntities();
                                     sendFeedback(removed == 0
@@ -226,6 +246,7 @@ public class SimulaticaClient implements ClientModInitializer {
                                         }))
                         )
                         .then(ClientCommands.literal("server")
+                                .requires(source -> !WorkshopManager.isActive())
                                 .then(ClientCommands.literal("start")
                                         .executes(ctx -> {
                                             try {
@@ -243,11 +264,6 @@ public class SimulaticaClient implements ClientModInitializer {
                                             SimulationManager.getInstance().clearLeftovers();
                                             SimulationServer.shutdown();
                                             sendFeedback("Simulation server stopped.");
-                                            return 1;
-                                        }))
-                                .then(ClientCommands.literal("selftest")
-                                        .executes(ctx -> {
-                                            SimulationSelfTest.run().forEach(SimulaticaClient::sendFeedback);
                                             return 1;
                                         }))
                         )

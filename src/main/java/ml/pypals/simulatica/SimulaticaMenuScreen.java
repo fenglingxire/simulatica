@@ -10,7 +10,7 @@ import ml.pypals.simulatica.carpet.CarpetIntegration;
 import ml.pypals.simulatica.counter.HopperCounter;
 import ml.pypals.simulatica.simulation.SimulationManager;
 import ml.pypals.simulatica.simulation.server.SimulationCommands;
-import ml.pypals.simulatica.simulation.server.SimulationSelfTest;
+import ml.pypals.simulatica.workshop.WorkshopManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.AbstractWidget;
@@ -178,9 +178,6 @@ public final class SimulaticaMenuScreen extends Screen {
                     : "Purged " + removed + " escaped entities.");
         });
         this.leftNextY += ROW_HEIGHT;
-        addLeftButton("运行自检诊断", this.leftNextY, this.leftWidth,
-                b -> SimulationSelfTest.run().forEach(SimulaticaClient::sendFeedback));
-        this.leftNextY += ROW_HEIGHT;
 
         // 漏斗计数器
         addSection("漏斗计数器");
@@ -326,6 +323,18 @@ public final class SimulaticaMenuScreen extends Screen {
         this.init();
     }
 
+    @Override
+    public boolean charTyped(net.minecraft.client.input.CharacterEvent event) {
+        if (WorkshopManager.isActive()) { WorkshopManager.requestReturn(); return true; }
+        return super.charTyped(event);
+    }
+
+    @Override
+    public void tick() {
+        if (WorkshopManager.isActive()) WorkshopManager.requestReturn();
+        else super.tick();
+    }
+
     private void startAllPlacements() {
         for (SchematicPlacement placement : this.placements) {
             SimulationManager.getInstance().startSimulation(placement);
@@ -450,6 +459,7 @@ public final class SimulaticaMenuScreen extends Screen {
 
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean hasActiveButton) {
+        if (WorkshopManager.isActive()) { WorkshopManager.requestReturn(); return true; }
         if (event.button() == 0) {
             int mx = (int) event.x();
             int my = (int) event.y();
@@ -495,6 +505,7 @@ public final class SimulaticaMenuScreen extends Screen {
     // ------------------------------------------------------------------
     @Override
     public boolean keyPressed(KeyEvent event) {
+        if (WorkshopManager.isActive()) { WorkshopManager.requestReturn(); return true; }
         if (event.key() == InputConstants.KEY_TAB
                 && this.commandField != null
                 && this.commandField.isFocused()) {

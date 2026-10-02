@@ -346,6 +346,11 @@ public final class SimulationServer extends MinecraftServer {
 
     public ProjectionBridge attach(SimulationLevel level, BlockPos worldMin, BlockPos worldMax,
                                    String label, Set<UUID> preserved) {
+        return attach(level, worldMin, worldMax, label, preserved, label);
+    }
+
+    public ProjectionBridge attach(SimulationLevel level, BlockPos worldMin, BlockPos worldMax,
+                                   String label, Set<UUID> preserved, String storageKey) {
         ResourceKey<Level> dimension = level.dimension();
         SimulationRegion region = this.allocate(dimension, worldMin, worldMax, label);
 
@@ -355,11 +360,11 @@ public final class SimulationServer extends MinecraftServer {
         this.pumpUntilTicking(level, min, max);
 
         // The store's state is newer than the schematic's, so its entities win the copy too.
-        Set<UUID> saved = LeftoverStore.savedIds(label);
+        Set<UUID> saved = LeftoverStore.savedIds(storageKey);
         Set<UUID> present = new HashSet<>(preserved);
         present.addAll(saved);
 
-        ProjectionBridge bridge = new ProjectionBridge(level, region, label);
+        ProjectionBridge bridge = new ProjectionBridge(level, region, label, storageKey);
         int copied = bridge.copyIn(present);
         this.bridges.add(bridge);
         bridge.setViewer(SimulationViewer.create(this, level, region.simBounds().getCenter(), bridge::onPacket));
@@ -367,7 +372,7 @@ public final class SimulationServer extends MinecraftServer {
         // Saved entities are not in the level yet -- only live leftovers and fresh copies are.
         present.removeAll(saved);
         for (UUID uuid : saved) if (level.getEntity(uuid) != null) present.add(uuid);
-        LeftoverStore.load(label, level, present);
+        LeftoverStore.load(storageKey, level, present);
 
         if (copied == 0) {
             Simulatica.LOGGER.warn("[Simulatica] Attached '{}' but copied no blocks, is the projection loaded?",

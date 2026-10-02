@@ -32,8 +32,11 @@ public abstract class LitematicaMainMenuMixin {
         int y = projectsShown ? 184 : 162;
 
         ButtonGeneric button = new ButtonGeneric(x, y, width, 20, "投影交互菜单");
-        self.addButton(button, (btn, mouseButton) ->
-                Minecraft.getInstance().gui.setScreen(new SimulaticaMenuScreen()));
+        self.addButton(button, (btn, mouseButton) -> {
+            if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) {
+                ml.pypals.simulatica.workshop.WorkshopManager.requestReturn();
+            } else Minecraft.getInstance().gui.setScreen(new SimulaticaMenuScreen());
+        });
     }
 
     @Invoker("getButtonWidth")

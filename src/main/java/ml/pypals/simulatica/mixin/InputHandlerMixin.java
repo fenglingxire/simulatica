@@ -73,6 +73,11 @@ import java.util.Optional;
 @Mixin(value = InputHandler.class, remap = false)
 public class InputHandlerMixin {
 
+    @Inject(method = "handleMouseScroll", at = @At("HEAD"), cancellable = true)
+    private void workshop$nativeScroll(CallbackInfoReturnable<Boolean> cir) {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) cir.setReturnValue(false);
+    }
+
     @Unique
     private static final double SIMULATICA_REACH = 10.0;
 
@@ -82,6 +87,7 @@ public class InputHandlerMixin {
 
     @Inject(method = "handleAttackKey", at = @At("HEAD"), cancellable = true)
     private void simulatica$handleAttackKey(Minecraft mc, CallbackInfoReturnable<Boolean> cir) {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) { cir.setReturnValue(false); return; }
         if (mc.player == null || DataManager.getToolMode() != SimulaticaClient.SIMULATE) return;
 
         BlockHitResult hit = simulatica$traceSchematicHit(mc);
@@ -136,6 +142,7 @@ public class InputHandlerMixin {
 
     @Inject(method = "handleUseKey", at = @At("HEAD"), cancellable = true)
     private void simulatica$handleUseKey(Minecraft mc, CallbackInfoReturnable<Boolean> cir) {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) { cir.setReturnValue(false); return; }
         if (mc.player == null || DataManager.getToolMode() != SimulaticaClient.SIMULATE) return;
 
         // Projectile weapons go first: aiming a bow at a simulated mob must draw the bow, not

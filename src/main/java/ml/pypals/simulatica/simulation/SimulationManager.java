@@ -8,15 +8,19 @@ import fi.dy.masa.litematica.schematic.placement.SubRegionPlacement;
 import fi.dy.masa.litematica.selection.Box;
 import fi.dy.masa.litematica.util.PositionUtils;
 import fi.dy.masa.malilib.util.InfoUtils;
+import fi.dy.masa.malilib.util.EntityUtils;
 import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
 import ml.pypals.simulatica.Simulatica;
+import ml.pypals.simulatica.config.SimulaticaConfigs;
 import ml.pypals.simulatica.carpet.BotManager;
 import ml.pypals.simulatica.simulation.server.LeftoverStore;
 import ml.pypals.simulatica.simulation.server.ProjectionBridge;
 import ml.pypals.simulatica.simulation.server.SimulationServer;
 import ml.pypals.simulatica.simulation.server.SimulationLevel;
+import ml.pypals.simulatica.simulation.server.SimulationClock;
 import ml.pypals.simulatica.counter.HopperCounter;
+import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
@@ -34,6 +38,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.block.Mirror;
 import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
@@ -42,6 +47,7 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -64,6 +70,7 @@ public class SimulationManager {
     private final Map<SchematicPlacement, Simulation> active = new LinkedHashMap<>();
 
     private boolean itemAbsorption;
+    @Nullable private SchematicPlacement lastTpsPlacement;
 
     /**
      * Entities left behind when a simulation stops. They keep their last simulated state and
@@ -101,13 +108,17 @@ public class SimulationManager {
      */
     public int purgeEscapedEntities() {
         int removed = 0;
-        for (ProjectionBridge bridge : getAllSimulations()) {
-            AABB bounds = bridge.region().simBounds();
+        Collection<ProjectionBridge> bridges = getAllSimulations();
+        Map<SimulationLevel, java.util.Set<java.util.UUID>> visited = new java.util.HashMap<>();
+        for (ProjectionBridge bridge : bridges) {
             for (Entity entity : bridge.entities()) {
-                if (entity instanceof EnderDragonPart) {
+                if (entity instanceof EnderDragonPart
+                        || !visited.computeIfAbsent(bridge.level(), key -> new java.util.HashSet<>()).add(entity.getUUID())) {
                     continue;
                 }
-                if (!bounds.contains(entity.getBoundingBox().getCenter())) {
+                boolean inside = bridges.stream().anyMatch(other -> other.level() == bridge.level()
+                        && other.region().simBounds().contains(entity.getBoundingBox().getCenter()));
+                if (!inside) {
                     entity.discard();
                     removed++;
                 }
@@ -506,7 +517,8 @@ public class SimulationManager {
                         level,
                         box.min(), box.max(),
                         placement.getName() + "/" + entry.getKey(),
-                        preserveLeftoversIntersecting(level, box)));
+                        preserveLeftoversIntersecting(level, box),
+                        LeftoverStore.prepareKey(placement, entry.getKey())));
             } catch (Exception e) {
                 Simulatica.LOGGER.error("[Simulatica] Failed to simulate region '{}': {}",
                         entry.getKey(), e.getMessage(), e);
@@ -596,10 +608,15 @@ public class SimulationManager {
         // Attaching is left to the tick: the projection may not be built yet, and the readiness
         // check that handles a moved placement handles a far-away one just as well.
         active.put(placement, new Simulation(boxesOf(placement), PlacementTransform.of(placement)));
+        ml.pypals.simulatica.workshop.EditedPlacementCache.simulationStateChanged(placement, true);
     }
 
+    private boolean closingWorld;
+
     public void stopSimulation(SchematicPlacement placement) {
+        if (!closingWorld) ml.pypals.simulatica.workshop.EditedPlacementCache.simulationStateChanged(placement, false);
         Simulation simulation = active.remove(placement);
+        if (placement == lastTpsPlacement) lastTpsPlacement = null;
         if (simulation == null) {
             Simulatica.LOGGER.warn("[Simulatica] No active simulation for placement '{}'",
                     placement.getName());
@@ -619,24 +636,45 @@ public class SimulationManager {
                 placement.getName());
     }
 
+    /** Replaces edited simulation contents without saving the superseded entities as leftovers. */
+    public void discardSimulationState(SchematicPlacement placement) {
+        Simulation simulation = active.remove(placement);
+        SimulationLevel level = levels.remove(placement);
+        BotManager.removeAll(placement);
+        if (level != null) {
+            WorldSchematic projection = SchematicWorldHandler.getSchematicWorld();
+            List<Entity> entities = new ArrayList<>();
+            level.getAllEntities().forEach(entities::add);
+            for (Entity entity : entities) {
+                if (projection != null) ProjectionBridge.unpublishEntity(projection, entity);
+                entity.discard();
+            }
+            leftovers.removeIf(leftover -> leftover.level() == level);
+            level.clock.suspend();
+        }
+        SimulationServer server = SimulationServer.getRunning();
+        if (simulation != null && server != null) simulation.bridges.values().forEach(server::detach);
+    }
+
     /**
      * Detaches every bridge of a simulation, keeping its live entities as leftovers the way
      * {@link #stopSimulation} does. Shared by the explicit stop path and the orphan-cleanup path
      * in {@link #followPlacements}.
      */
     private void detachSimulation(Simulation simulation, SimulationServer server) {
+        java.util.Set<java.util.UUID> stored = new java.util.HashSet<>();
         for (ProjectionBridge bridge : simulation.bridges.values()) {
             List<Entity> kept = new ArrayList<>();
             for (Entity entity : bridge.entities()) {
                 // Players (fake bots) are reclaimed separately and never stored as leftovers:
                 // they cannot round-trip through the generic entity NBT loader.
                 if (!entity.isRemoved() && !(entity instanceof EnderDragonPart)
-                        && !(entity instanceof Player)) {
+                        && !(entity instanceof Player) && stored.add(entity.getUUID())) {
                     kept.add(entity);
                 }
             }
             if (!kept.isEmpty()) {
-                LeftoverStore.save(bridge.label(), kept, bridge.level());
+                LeftoverStore.save(bridge.storageKey(), kept, bridge.level());
                 this.leftovers.add(new LeftoverEntities(bridge.level(), bridge.label(), bridge.region().simBounds(), kept));
             }
             server.detach(bridge);
@@ -656,6 +694,7 @@ public class SimulationManager {
         }
         this.leftovers.clear();
         this.levels.clear();
+        this.lastTpsPlacement = null;
         HopperCounter.clearAll();
     }
 
@@ -704,6 +743,19 @@ public class SimulationManager {
         return active.containsKey(placement);
     }
 
+    /** Connection cleanup preserves the user's desired state for cached edited placements. */
+    public void stopAllForWorldChange() {
+        boolean previous = closingWorld;
+        closingWorld = true;
+        try { stopAll(); }
+        finally { closingWorld = previous; }
+    }
+
+    @Nullable
+    public SimulationLevel projectionLevel(SchematicPlacement placement) {
+        return levels.get(placement);
+    }
+
     public void setTps(SchematicPlacement placement, int tps) throws java.io.IOException {
         TpsSettings.set(placement.getName(), tps);
         if (levels.containsKey(placement)) levels.get(placement).clock.setTarget(tps);
@@ -715,6 +767,51 @@ public class SimulationManager {
 
     public List<String> describeRates() {
         return active.keySet().stream().map(this::describeTps).toList();
+    }
+
+    public List<String> describeTpsHud() {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) return List.of();
+        List<SchematicPlacement> running = active.entrySet().stream()
+                .filter(entry -> levels.containsKey(entry.getKey()) && !entry.getValue().bridges.isEmpty())
+                .map(Map.Entry::getKey).toList();
+        if (!running.contains(lastTpsPlacement)) lastTpsPlacement = null;
+        if (SimulaticaConfigs.TPS_MULTILINE.getBooleanValue()) {
+            return running.stream().map(placement -> formatTpsHud(levels.get(placement).clock, placement.getName())).toList();
+        }
+
+        Entity camera = EntityUtils.getCameraEntity();
+        if (camera != null) {
+            Vec3 eye = camera.getEyePosition();
+            Vec3 end = eye.add(camera.getViewVector(1.0F).scale(Minecraft.getInstance().options.getEffectiveRenderDistance() * 16.0));
+            double nearest = Double.MAX_VALUE;
+            for (SchematicPlacement placement : running) {
+                for (ProjectionBridge bridge : active.get(placement).bridges.values()) {
+                    var region = bridge.region();
+                    AABB bounds = AABB.encapsulatingFullBlocks(region.worldMin(), region.worldMax());
+                    var hit = bounds.contains(eye) ? java.util.Optional.of(eye) : bounds.clip(eye, end);
+                    if (hit.isPresent() && eye.distanceToSqr(hit.get()) < nearest) {
+                        nearest = eye.distanceToSqr(hit.get());
+                        lastTpsPlacement = placement;
+                    }
+                }
+            }
+        }
+
+        SchematicPlacement focus = lastTpsPlacement;
+        if (focus == null) {
+            SchematicPlacement selected = DataManager.getSchematicPlacementManager().getSelectedSchematicPlacement();
+            if (running.contains(selected)) focus = selected;
+        }
+        List<SchematicPlacement> shown = focus != null ? List.of(focus) : running;
+        return shown.stream().map(placement -> formatTpsHud(levels.get(placement).clock, placement.getName())).toList();
+    }
+
+    static String formatTpsHud(SimulationClock clock, String name) {
+        String rate = ChatFormatting.AQUA + "Simulatica TPS: " + ChatFormatting.WHITE
+                + String.format(Locale.ROOT, "%.1f", clock.actual()) + ChatFormatting.GRAY + "/" + clock.target();
+        var font = Minecraft.getInstance().font;
+        String label = font.width(name) <= 120 ? name : font.plainSubstrByWidth(name, 120 - font.width("…")) + "…";
+        return (name.isBlank() ? rate : rate + " | " + label) + ChatFormatting.RESET;
     }
 
     public SimulationLevel commandLevel() {

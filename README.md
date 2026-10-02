@@ -18,6 +18,16 @@ Simulatica 让 **Litematica 的原理图投影"活"起来**——它在你的客
 
 ## 🆕 二、本二改版新增功能
 
+### 临时创造工作间
+
+连接多人服务器并选中一个 Litematica 放置后，运行 `/simulatica workshop enter`；也可用 `/simulatica workshop enter "放置名称"` 指定放置。重名时请先在 Litematica 中选中具体放置。工作间在同一个窗口中运行本地创造世界，原服务器连接保持在后台。建筑保留原坐标，旁边生成一块 16×16 草平台；本地支持原版容器、实体、红石与 OP 4 命令。
+
+运行 `/simulatica workshop return` 或点击暂停菜单的“返回服务器”，选择应用全部修改、放弃全部修改或继续编辑。应用包括测试运转后的最终状态，只更新这个放置，原 `.litematic` 文件不会自动保存。需要永久保留时，请在 Litematica 中手动保存。正常返回后临时世界删除；后台断线仍可继续编辑并应用。
+
+未保存修改仅保存在游戏进程内，重登原服务器或回到原维度时恢复到对应放置。手动卸载或重新加载该投影视为撤销内存修改；关闭游戏后内存修改消失。新增建筑可以超出原范围；若占用了关闭的子区域，应用界面会提示冲突，可启用该区域并保留当前编辑，或继续编辑并移开新增内容。
+
+第一版支持原版三维度。自定义维度、尚未加载完整的投影、与其他放置重叠的投影或无法完整编码的数据会明确报错；应用失败时保留工作间供继续编辑。
+
 ### 每个投影独立 TPS
 
 `/simulatica tps "放置名称" 200` 将指定投影设为目标 200 TPS（10 倍速）；省略数值查询目标 TPS。范围为整数 1–1000，默认 20，名称需使用 Litematica 的放置名称，重名时先改名。设置按世界与放置名称保存，停止再启动及退出重进仍生效；改名后使用新名称的配置。
@@ -107,7 +117,6 @@ Simulatica 给 Litematica 新增了一个工具模式 **模拟交互（Simulate 
 └── server
     ├── start                   仅启动后台模拟服务器
     ├── stop                    停止全部模拟并关闭模拟服务器
-    └── selftest                运行自检诊断
 ```
 
 ### 🆕 控制面板（裸输 `/simulatica` 打开）
@@ -160,10 +169,6 @@ Simulatica 给 Litematica 新增了一个工具模式 **模拟交互（Simulate 
 
 手动管理后台模拟服务器，日常不需要（start 会自动拉起）。退图/断连时全部模拟与服务器自动关闭。
 
-### `/simulatica server selftest`
-
-内置冒烟测试，逐项 `PASS / FAIL`（区块强加载、重力方块下落渲染）。"模拟没反应"时先跑它定位。
-
 ---
 
 ## 四、注意事项与限制
@@ -191,7 +196,7 @@ Simulatica 给 Litematica 新增了一个工具模式 **模拟交互（Simulate 
 → 检查：① 是否切到「模拟交互」模式；② 是否已 `/simulatica start`；③ 屏幕提示（如"放置「xxx」尚未启动模拟"）。
 
 **Q：模拟好像不动？**  
-→ 先 `/simulatica status` 看是否 pending；再 `/simulatica server selftest` 自检。
+→ 先 `/simulatica status` 看是否 pending，并检查游戏日志。
 
 **Q：能用原版指令改模拟世界的时间/天气吗？**  
 → 可以：`/simulatica execute time set day`、`/simulatica execute weather clear`。
@@ -212,7 +217,7 @@ Simulatica 给 Litematica 新增了一个工具模式 **模拟交互（Simulate 
 ```bash
 # 需要 JDK 25
 ./gradlew build
-# 产物：build/libs/simulatica-2.0.0.jar
+# 产物：build/libs/simulatica-1.1.0.jar
 ```
 
 ## 许可证

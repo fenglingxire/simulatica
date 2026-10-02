@@ -143,7 +143,9 @@ public final class CarpetIntegration {
             Object pack = getActionPack.invoke(player);
             Object type = enumConstant(action);
             Object actionSpec;
-            if (intervalTicks < 0) {
+            if (intervalTicks == 0) {
+                actionSpec = null; // Carpet start(type, null) stops only this action.
+            } else if (intervalTicks < 0) {
                 actionSpec = actionContinuous.invoke(null);
             } else {
                 actionSpec = actionInterval.invoke(null, intervalTicks);

@@ -422,6 +422,31 @@ public final class PlacementConfigScreen extends Screen {
     }
 
     @Override
+    public boolean mouseClicked(net.minecraft.client.input.MouseButtonEvent event, boolean hasActiveButton) {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) {
+            ml.pypals.simulatica.workshop.WorkshopManager.requestReturn();
+            return true;
+        }
+        return super.mouseClicked(event, hasActiveButton);
+    }
+
+    @Override
+    public boolean keyPressed(net.minecraft.client.input.KeyEvent event) {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) {
+            ml.pypals.simulatica.workshop.WorkshopManager.requestReturn();
+            return true;
+        }
+        return super.keyPressed(event);
+    }
+
+    @Override
+    public void tick() {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive())
+            ml.pypals.simulatica.workshop.WorkshopManager.requestReturn();
+        else super.tick();
+    }
+
+    @Override
     public boolean isPauseScreen() {
         return false;
     }

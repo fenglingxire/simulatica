@@ -11,6 +11,11 @@ import org.slf4j.LoggerFactory;
 
 public class Simulatica implements ModInitializer {
 	public static final String MOD_ID = "simulatica";
+	/** 模组版本号（从 fabric.mod.json 读，配置界面标题要显示）。 */
+	public static final String VERSION = FabricLoader.getInstance()
+			.getModContainer(MOD_ID)
+			.map(container -> container.getMetadata().getVersion().getFriendlyString())
+			.orElse("unknown");
 
 	// This logger is used to write text to the console and the log file.
 	// It is considered best practice to use your mod id as the logger's name.

@@ -30,6 +30,7 @@ public final class SimulationCommandBlocks {
     private SimulationCommandBlocks() {}
 
     public static boolean open(CommandBlockEntity blockEntity) {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) return false;
         if (!(blockEntity.getLevel() instanceof SimulationLevel simulated)) {
             return false;
         }
@@ -42,6 +43,7 @@ public final class SimulationCommandBlocks {
     }
 
     public static boolean apply(ServerboundSetCommandBlockPacket packet) {
+        if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) return false;
         if (level == null || pos == null || !pos.equals(packet.getPos())
                 || Minecraft.getInstance().gui.screen() != screen) {
             return false;
@@ -89,7 +91,7 @@ public final class SimulationCommandBlocks {
         return true;
     }
 
-    private static void clear() {
+    public static void clear() {
         level = null;
         pos = null;
         screen = null;
