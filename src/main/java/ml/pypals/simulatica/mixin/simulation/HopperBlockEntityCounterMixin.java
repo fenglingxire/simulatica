@@ -47,7 +47,7 @@ public abstract class HopperBlockEntityCounterMixin extends RandomizableContaine
     @Inject(method = "ejectItems", at = @At("HEAD"), cancellable = true)
     private static void simulatica$onEjectItems(Level level, BlockPos pos, HopperBlockEntity hopper,
                                                 CallbackInfoReturnable<Boolean> cir) {
-        if (!(level instanceof SimulationLevel)) {
+        if (!(level instanceof SimulationLevel simulationLevel)) {
             return;
         }
         Direction facing = level.getBlockState(pos).getValue(HopperBlock.FACING);
@@ -57,7 +57,7 @@ public abstract class HopperBlockEntityCounterMixin extends RandomizableContaine
             return;
         }
 
-        HopperCounter counter = HopperCounter.getCounter(color);
+        HopperCounter counter = HopperCounter.getCounter(simulationLevel, color);
         boolean counted = false;
         for (int i = 0; i < hopper.getContainerSize(); i++) {
             ItemStack stack = hopper.getItem(i);

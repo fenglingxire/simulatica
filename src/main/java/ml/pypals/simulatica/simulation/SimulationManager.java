@@ -15,6 +15,8 @@ import ml.pypals.simulatica.carpet.BotManager;
 import ml.pypals.simulatica.simulation.server.LeftoverStore;
 import ml.pypals.simulatica.simulation.server.ProjectionBridge;
 import ml.pypals.simulatica.simulation.server.SimulationServer;
+import ml.pypals.simulatica.simulation.server.SimulationLevel;
+import ml.pypals.simulatica.counter.HopperCounter;
 import net.minecraft.client.Minecraft;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
@@ -49,6 +51,8 @@ import java.util.Map;
  * - 新增掉落物吸收 absorbItems()（含经验球与箭矢，含创造模式射出的 CREATIVE_ONLY 箭矢）与越界实体清理 purgeEscapedEntities()
  */
 public class SimulationManager {
+    // Stopped worlds keep frozen leftover entities until restart or disconnect.
+    private final Map<SchematicPlacement, SimulationLevel> levels = new LinkedHashMap<>();
 
     /** Ticks a changed placement must hold still before it is even considered, so a drag does not thrash. */
     private static final int SETTLE_TICKS = 5;
@@ -67,7 +71,7 @@ public class SimulationManager {
      */
     private final List<LeftoverEntities> leftovers = new ArrayList<>();
 
-    private record LeftoverEntities(String label, AABB bounds, List<Entity> entities) {
+    private record LeftoverEntities(SimulationLevel level, String label, AABB bounds, List<Entity> entities) {
     }
 
     private SimulationManager() {}
@@ -172,6 +176,14 @@ public class SimulationManager {
         }
 
         followPlacements(server);
+        levels.forEach((placement, level) -> {
+            if (!placement.getName().equals(level.projectionName())) {
+                level.setProjectionName(placement.getName());
+                level.clock.setTarget(TpsSettings.get(placement.getName()));
+                Simulation simulation = active.get(placement);
+                if (simulation != null) simulation.bridges.forEach((name, bridge) -> bridge.setLabel(placement.getName() + "/" + name));
+            }
+        });
         server.tickSimulation();
         if (this.itemAbsorption) {
             absorbItems();
@@ -255,6 +267,7 @@ public class SimulationManager {
         while (iterator.hasNext()) {
             Map.Entry<SchematicPlacement, Simulation> entry = iterator.next();
             if (!loaded.contains(entry.getKey())) {
+                BotManager.removeAll(entry.getKey());
                 detachSimulation(entry.getValue(), server);
                 iterator.remove();
             }
@@ -479,15 +492,21 @@ public class SimulationManager {
     }
 
     private void attach(SimulationServer server, SchematicPlacement placement, Simulation simulation) {
+        var level = levels.computeIfAbsent(placement, key -> {
+            var created = server.createProjectionLevel(Minecraft.getInstance().level.dimension(), key.getName());
+            created.clock.setTarget(TpsSettings.get(key.getName()));
+            return created;
+        });
+        level.clock.suspend();
         for (Map.Entry<String, RegionBox> entry : simulation.boxes.entrySet()) {
             RegionBox box = entry.getValue();
             try {
                 assert Minecraft.getInstance().level != null;
                 simulation.bridges.put(entry.getKey(), server.attach(
-                        Minecraft.getInstance().level.dimension(),
+                        level,
                         box.min(), box.max(),
                         placement.getName() + "/" + entry.getKey(),
-                        preserveLeftoversIntersecting(box)));
+                        preserveLeftoversIntersecting(level, box)));
             } catch (Exception e) {
                 Simulatica.LOGGER.error("[Simulatica] Failed to simulate region '{}': {}",
                         entry.getKey(), e.getMessage(), e);
@@ -590,6 +609,7 @@ public class SimulationManager {
         // Fake players are simulation-owned and must not linger in the scratch world once the
         // placement stops simulating.
         BotManager.removeAll(placement);
+        if (levels.containsKey(placement)) levels.get(placement).clock.suspend();
 
         SimulationServer server = SimulationServer.getRunning();
         if (server != null) {
@@ -617,7 +637,7 @@ public class SimulationManager {
             }
             if (!kept.isEmpty()) {
                 LeftoverStore.save(bridge.label(), kept, bridge.level());
-                this.leftovers.add(new LeftoverEntities(bridge.label(), bridge.region().simBounds(), kept));
+                this.leftovers.add(new LeftoverEntities(bridge.level(), bridge.label(), bridge.region().simBounds(), kept));
             }
             server.detach(bridge);
         }
@@ -635,6 +655,8 @@ public class SimulationManager {
             leftover.entities().forEach(Entity::discard);
         }
         this.leftovers.clear();
+        this.levels.clear();
+        HopperCounter.clearAll();
     }
 
     /**
@@ -647,13 +669,13 @@ public class SimulationManager {
      * attach can keep the projection's copies of them from being duplicated into the
      * simulation -- the live originals are the newer state.</p>
      */
-    private java.util.Set<java.util.UUID> preserveLeftoversIntersecting(RegionBox box) {
+    private java.util.Set<java.util.UUID> preserveLeftoversIntersecting(SimulationLevel level, RegionBox box) {
         java.util.Set<java.util.UUID> preserved = new java.util.HashSet<>();
         if (this.leftovers.isEmpty()) {
             return preserved;
         }
         this.leftovers.removeIf(leftover -> {
-            if (!intersects(leftover.bounds(), box)) {
+            if (leftover.level() != level || !intersects(leftover.bounds(), box)) {
                 return false;
             }
             for (Entity entity : leftover.entities()) {
@@ -680,6 +702,29 @@ public class SimulationManager {
 
     public boolean isSimulating(SchematicPlacement placement) {
         return active.containsKey(placement);
+    }
+
+    public void setTps(SchematicPlacement placement, int tps) throws java.io.IOException {
+        TpsSettings.set(placement.getName(), tps);
+        if (levels.containsKey(placement)) levels.get(placement).clock.setTarget(tps);
+    }
+
+    public String describeTps(SchematicPlacement placement) {
+        return placement.getName() + ": 目标 " + TpsSettings.get(placement.getName()) + " TPS";
+    }
+
+    public List<String> describeRates() {
+        return active.keySet().stream().map(this::describeTps).toList();
+    }
+
+    public SimulationLevel commandLevel() {
+        SchematicPlacement selected = DataManager.getSchematicPlacementManager().getSelectedSchematicPlacement();
+        if (active.containsKey(selected) && levels.containsKey(selected)) return levels.get(selected);
+        if (active.size() == 1) {
+            var level = levels.get(active.keySet().iterator().next());
+            if (level != null) return level;
+        }
+        throw new IllegalStateException("请先选择一个已启动的投影。");
     }
 
     @Nullable

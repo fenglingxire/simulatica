@@ -46,6 +46,11 @@
     "requireAnnotations": true
   },
   "client": [
-    "ServerPlayerAvatarMixin"
+    "ServerPlayerAvatarMixin",
+    "PistonHeadRendererMixin",
+    "RenderTypeInvoker",
+    "ChunkRendererSchematicAccessor",
+    "ChunkRendererSchematicMixin",
+    "SchematicRenderStateAccessor"
   ]
 }

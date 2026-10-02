@@ -16,4 +16,7 @@ public interface SimPistonMovingBlockEntityAccessor {
 
     @Accessor("progress")
     float sim$getProgress();
+
+    @Accessor("progress")
+    void sim$setProgress(float progress);
 }

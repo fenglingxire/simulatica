@@ -13,6 +13,20 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.RedstoneLampBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.core.Direction;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.SubmitNodeCollector;
+import net.minecraft.client.renderer.rendertype.RenderType;
+import net.minecraft.world.level.block.piston.MovingPistonBlock;
+import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import com.mojang.blaze3d.vertex.ByteBufferBuilder;
+import com.mojang.blaze3d.vertex.BufferBuilder;
+import com.mojang.blaze3d.vertex.PoseStack;
+import ml.pypals.simulatica.mixin.simulation.SimPistonMovingBlockEntityAccessor;
+import ml.pypals.simulatica.render.ProjectionPistonRenderer;
+import fi.dy.masa.litematica.config.Configs;
+import java.lang.reflect.Proxy;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -54,6 +68,7 @@ public final class SimulationSelfTest {
             forceLoad(server, level, results);
             gravity(server, level, results);
             redstone(server, level, results);
+            results.add(pistonRendering());
 
             results.add(changed.isEmpty()
                     ? "FAIL notify: sendBlockUpdated never fired"
@@ -65,6 +80,78 @@ public final class SimulationSelfTest {
             releaseChunks(level);
         }
         return results;
+    }
+
+    /** Exercises the real renderer, including textured and blue-overlay vertex buffers. */
+    public static String pistonRendering() {
+        WorldSchematic projection = SchematicWorldHandler.getSchematicWorld();
+        if (projection == null) return "FAIL piston rendering: no schematic world";
+        Minecraft mc = Minecraft.getInstance();
+        int[] geometry = {0};
+        int[] order = {0};
+        SubmitNodeCollector collector = (SubmitNodeCollector) Proxy.newProxyInstance(
+                SubmitNodeCollector.class.getClassLoader(), new Class<?>[]{SubmitNodeCollector.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("order")) {
+                        order[0] = (int) args[0];
+                        return proxy;
+                    }
+                    if (method.getName().equals("submitCustomGeometry")) {
+                        RenderType type = (RenderType) args[1];
+                        int expected = type == net.minecraft.client.renderer.rendertype.RenderTypes.translucentMovingBlock()
+                                ? 0 : type.primitiveTopology() == com.mojang.blaze3d.PrimitiveTopology.QUADS ? 1 : 2;
+                        if (order[0] != expected) throw new AssertionError("piston overlay rendered before its model");
+                        order[0] = 0;
+                        if (type.outputTarget() != net.minecraft.client.renderer.rendertype.RenderTypes.translucentMovingBlock().outputTarget()) {
+                            throw new AssertionError("piston model and overlay must composite together");
+                        }
+                        try (ByteBufferBuilder memory = new ByteBufferBuilder(4096)) {
+                            BufferBuilder buffer = new BufferBuilder(memory, type.primitiveTopology(), type.format());
+                            ((SubmitNodeCollector.CustomGeometryRenderer) args[2]).render(
+                                    ((PoseStack) args[0]).last().copy(), buffer);
+                            try (var mesh = buffer.buildOrThrow()) {
+                                if (mesh.drawState().vertexCount() == 0) throw new AssertionError("empty piston mesh");
+                            }
+                        }
+                        geometry[0]++;
+                    }
+                    return null;
+                });
+        int cases = 0;
+        for (Direction direction : Direction.values()) {
+            for (boolean extending : new boolean[]{true, false}) {
+                for (var carried : new Block[]{
+                        Blocks.STONE, Blocks.SLIME_BLOCK, Blocks.HONEY_BLOCK, Blocks.PISTON}) {
+                    BlockState moving = Blocks.MOVING_PISTON.defaultBlockState()
+                            .setValue(MovingPistonBlock.FACING, direction);
+                    boolean source = carried == Blocks.PISTON;
+                    BlockState payload = (source && extending ? Blocks.PISTON_HEAD : carried).defaultBlockState();
+                    if (payload.hasProperty(BlockStateProperties.FACING)) {
+                        payload = payload.setValue(BlockStateProperties.FACING, direction);
+                    }
+                    PistonMovingBlockEntity piston = new PistonMovingBlockEntity(
+                            mc.player.blockPosition().above(), moving, payload, direction, extending, source);
+                    piston.setLevel(projection);
+                    ((SimPistonMovingBlockEntityAccessor) piston).sim$setProgressO(0);
+                    ((SimPistonMovingBlockEntityAccessor) piston).sim$setProgress(0.5F);
+                    var extracted = mc.getBlockEntityRenderDispatcher().tryExtractRenderState(piston, 0.5F, null, false);
+                    if (!(extracted instanceof ProjectionPistonRenderer.State state) || !state.projected || state.block == null) {
+                        throw new AssertionError("missing projected piston model: " + direction + "/" + extending + "/" + carried);
+                    }
+                    if (Math.abs(state.xOffset - piston.getXOff(0.5F)) > 0.0001F
+                            || Math.abs(state.yOffset - piston.getYOff(0.5F)) > 0.0001F
+                            || Math.abs(state.zOffset - piston.getZOff(0.5F)) > 0.0001F) {
+                        throw new AssertionError("piston interpolation changed");
+                    }
+                    if (source && !extending && state.base == null) throw new AssertionError("missing retracting base");
+                    state.blockColor = state.baseColor = Configs.Colors.SCHEMATIC_OVERLAY_COLOR_MISSING.getColor();
+                    mc.getBlockEntityRenderDispatcher().submit(state, new PoseStack(), collector, null);
+                    cases++;
+                }
+            }
+        }
+        if (geometry[0] == 0) throw new AssertionError("no projected piston geometry submitted");
+        return "PASS piston rendering: " + cases + " cases, " + geometry[0] + " nonempty meshes";
     }
 
     private static void releaseChunks(SimulationLevel level) {

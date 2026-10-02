@@ -45,6 +45,23 @@ import java.util.function.Consumer;
  * A real {@link ServerLevel} that exists only to run schematic simulations.
  */
 public class SimulationLevel extends ServerLevel {
+    public final SimulationClock clock = new SimulationClock();
+    private final TickRateManager simulationTickRate = new TickRateManager();
+    private String projectionName;
+    private final java.util.Set<SoundEvent> playedSounds = new java.util.HashSet<>();
+    private final java.util.Set<Integer> playedLevelEvents = new java.util.HashSet<>();
+
+    void beginClientTick() { playedSounds.clear(); playedLevelEvents.clear(); }
+
+    boolean allowLevelEvent(int event) { return clock.target() <= 20 || playedLevelEvents.add(event); }
+
+    boolean allowSound(SoundEvent sound) {
+        // ponytail: sample each sound type once per client tick above 20 TPS; add spatial mixing if needed.
+        return clock.target() <= 20 || playedSounds.add(sound);
+    }
+
+    public String projectionName() { return projectionName; }
+    public void setProjectionName(String name) { projectionName = name; }
     private final List<Consumer<BlockPos>> blockChangeListeners = new ArrayList<>();
 
     public SimulationLevel(SimulationServer server,
@@ -157,14 +174,10 @@ public class SimulationLevel extends ServerLevel {
         return all;
     }
 
-    /**
-     * Use the client's tick rate manager, rather than this server's own.
-     * Sharing the client's instance directly.
-     */
+    /** Each projection advances independently of the real world's tick controls. */
     @Override
     public @NonNull TickRateManager tickRateManager() {
-        ClientLevel client = Minecraft.getInstance().level;
-        return client != null ? client.tickRateManager() : super.tickRateManager();
+        return simulationTickRate;
     }
 
     /**
@@ -198,13 +211,13 @@ public class SimulationLevel extends ServerLevel {
 
         ClientLevel client = Minecraft.getInstance().level;
         if (client != null) {
-            SimulationBlockEventSounds.play(client, this.getBlockState(pos), pos, eventId, eventParam);
+            SimulationBlockEventSounds.play(client, this, this.getBlockState(pos), pos, eventId, eventParam);
         }
     }
 
     @Override
     public void globalLevelEvent(int i, @NonNull BlockPos blockPos, int j) {        if (this.getGameRules().get(GameRules.GLOBAL_SOUND_EVENTS) && Minecraft.getInstance().getConnection() != null) {
-            Minecraft.getInstance().getConnection().handleLevelEvent(new ClientboundLevelEventPacket(i, blockPos, j, true));
+            if (allowLevelEvent(i)) Minecraft.getInstance().getConnection().handleLevelEvent(new ClientboundLevelEventPacket(i, blockPos, j, true));
         } else {
             this.levelEvent(null, i, blockPos, j);
         }
@@ -212,7 +225,7 @@ public class SimulationLevel extends ServerLevel {
 
     @Override
     public void levelEvent(@org.jspecify.annotations.Nullable Entity entity, int i, @NonNull BlockPos blockPos, int j) {
-        if(Minecraft.getInstance().getConnection() != null){
+        if(Minecraft.getInstance().getConnection() != null && allowLevelEvent(i)){
             Minecraft.getInstance().getConnection().handleLevelEvent(new ClientboundLevelEventPacket(i, blockPos, j, false));
         }
     }
@@ -254,7 +267,7 @@ public class SimulationLevel extends ServerLevel {
         // ClientLevel.playSeededSound only plays anything when its first argument is the local
         // player (bytecode: it returns immediately otherwise), and that is not a contract worth
         // relying on. playLocalSound is what vanilla's own packet handlers use.
-        client.playLocalSound(x, y, z, sound.value(), source, volume, pitch, false);
+        if (allowSound(sound.value())) client.playLocalSound(x, y, z, sound.value(), source, volume, pitch, false);
     }
 
     /**
@@ -272,7 +285,7 @@ public class SimulationLevel extends ServerLevel {
             return;
         }
         SimulationServer server = (SimulationServer) this.getServer();
-        if (ProjectionBridge.covering(server.bridges(), entity.blockPosition()) == null) {
+        if (ProjectionBridge.covering(server.bridges(), this, entity.blockPosition()) == null) {
             return;
         }
         ClientLevel client = Minecraft.getInstance().level;
@@ -282,7 +295,7 @@ public class SimulationLevel extends ServerLevel {
 
         LivingEntityDeathSoundInvoker invoker = (LivingEntityDeathSoundInvoker) living;
         net.minecraft.sounds.SoundEvent sound = invoker.simulatica$deathSound();
-        if (sound != null) {
+        if (sound != null && allowSound(sound)) {
             float pitch = (this.random.nextFloat() - this.random.nextFloat()) * 0.2F + 1.0F;
             client.playLocalSound(entity.getX(), entity.getY(), entity.getZ(), sound,
                     living.getSoundSource(), invoker.simulatica$soundVolume(), pitch, false);

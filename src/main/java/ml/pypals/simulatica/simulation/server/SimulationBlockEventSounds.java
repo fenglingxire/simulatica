@@ -33,11 +33,12 @@ final class SimulationBlockEventSounds {
     private SimulationBlockEventSounds() {
     }
 
-    static void play(ClientLevel client, BlockState state, BlockPos pos, int eventId, int eventParam) {
+    static void play(ClientLevel client, SimulationLevel level, BlockState state, BlockPos pos, int eventId, int eventParam) {
         Block block = state.getBlock();
 
         if (block instanceof PistonBaseBlock) {
             boolean extending = (eventId & 1) == 0;
+            if (!level.allowSound(extending ? SoundEvents.PISTON_EXTEND : SoundEvents.PISTON_CONTRACT)) return;
             client.playLocalSound(pos, extending ? SoundEvents.PISTON_EXTEND : SoundEvents.PISTON_CONTRACT,
                     SoundSource.BLOCKS, 0.5F, client.getRandom().nextFloat() * 0.25F + 0.6F, false);
             return;
@@ -45,6 +46,7 @@ final class SimulationBlockEventSounds {
 
         if (block instanceof NoteBlock) {
             Holder<SoundEvent> sound = state.getValue(NoteBlock.INSTRUMENT).getSoundEvent();
+            if (!level.allowSound(sound.value())) return;
             client.playSeededSound(null, pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5,
                     sound, SoundSource.RECORDS, 3.0F, NoteBlock.getPitchFromNote(eventId), 0L);
             return;
@@ -52,7 +54,7 @@ final class SimulationBlockEventSounds {
 
         if (eventId == 1) {
             SoundEvent sound = lidSound(block, eventParam > 0);
-            if (sound != null) {
+            if (sound != null && level.allowSound(sound)) {
                 client.playLocalSound(pos, sound, SoundSource.BLOCKS, 0.5F,
                         client.getRandom().nextFloat() * 0.1F + 0.9F, false);
             }

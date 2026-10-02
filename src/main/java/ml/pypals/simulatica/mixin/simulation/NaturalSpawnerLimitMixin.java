@@ -27,11 +27,11 @@ public abstract class NaturalSpawnerLimitMixin {
     private static void simulatica$limitSpawning(ServerLevel level, LevelChunk chunk,
                                                  NaturalSpawner.SpawnState spawnState,
                                                  List<MobCategory> categories, CallbackInfo ci) {
-        if (!(level instanceof SimulationLevel)) {
+        if (!(level instanceof SimulationLevel simulationLevel)) {
             return;
         }
         SimulationServer server = SimulationServer.getRunning();
-        if (server == null || !server.isSimulatedChunk(chunk.getPos().x(), chunk.getPos().z())) {
+        if (server == null || !server.isSimulatedChunk(simulationLevel, chunk.getPos().x(), chunk.getPos().z())) {
             ci.cancel();
         }
     }

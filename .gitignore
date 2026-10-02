@@ -45,3 +45,12 @@ replay_*.log
 /net/
 /scratch/
 /reference/
+
+# AI assistant working data (memory / reviews / scratch) — must never be pushed
+
+.workbuddy-ai/
+.workbuddy/
+
+# scratch: probe scripts, reports, screenshot crops
+
+/work/

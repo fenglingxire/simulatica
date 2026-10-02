@@ -1,6 +1,7 @@
 package ml.pypals.simulatica;
 
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
 import fi.dy.masa.litematica.data.DataManager;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
@@ -97,7 +98,11 @@ public class SimulaticaClient implements ClientModInitializer {
                 menuRequested = false;
                 client.gui.setScreen(new SimulaticaMenuScreen());
             }
-            if (client.level == null || client.isPaused()) return;
+            if (client.level == null || client.isPaused()) {
+                SimulationServer server = SimulationServer.getRunning();
+                if (server != null) server.suspendClocks();
+                return;
+            }
             try {
                 SimulationManager.getInstance().tick();
             } catch (Throwable t) {
@@ -170,6 +175,23 @@ public class SimulaticaClient implements ClientModInitializer {
                                     return 1;
                                 })
                         )
+                        .then(ClientCommands.literal("tps")
+                                .then(ClientCommands.argument("placement_name", StringArgumentType.string())
+                                        .suggests((ctx, builder) -> {
+                                            String prefix = builder.getRemainingLowerCase();
+                                            for (SchematicPlacement placement : collectLoadedPlacements()) {
+                                                String name = placement.getName();
+                                                String quoted = StringArgumentType.escapeIfRequired(name);
+                                                if (name.toLowerCase(java.util.Locale.ROOT).startsWith(prefix)
+                                                        || quoted.toLowerCase(java.util.Locale.ROOT).startsWith(prefix))
+                                                    builder.suggest(quoted);
+                                            }
+                                            return builder.buildFuture();
+                                        })
+                                        .executes(ctx -> tpsByName(StringArgumentType.getString(ctx, "placement_name"), null))
+                                        .then(ClientCommands.argument("tps", IntegerArgumentType.integer(1, 1000))
+                                                .executes(ctx -> tpsByName(StringArgumentType.getString(ctx, "placement_name"),
+                                                        IntegerArgumentType.getInteger(ctx, "tps"))))))
                         .then(ClientCommands.literal("absorb")
                                 .executes(ctx -> {
                                     reportAbsorption(SimulationManager.getInstance().setItemAbsorption(null));
@@ -218,6 +240,7 @@ public class SimulaticaClient implements ClientModInitializer {
                                 .then(ClientCommands.literal("stop")
                                         .executes(ctx -> {
                                             SimulationManager.getInstance().stopAll();
+                                            SimulationManager.getInstance().clearLeftovers();
                                             SimulationServer.shutdown();
                                             sendFeedback("Simulation server stopped.");
                                             return 1;
@@ -249,11 +272,30 @@ public class SimulaticaClient implements ClientModInitializer {
 
         sendFeedback("Active simulations: " + bridges.size());
         waiting.forEach(line -> sendFeedback("  waiting: " + line));
+        SimulationManager.getInstance().describeRates().forEach(SimulaticaClient::sendFeedback);
         for (ProjectionBridge bridge : bridges) {
             SimulationRegion region = bridge.region();
             sendFeedback("  " + bridge.label()
                     + " @ " + region.worldMin().toShortString() + ".." + region.worldMax().toShortString()
                     + " -- " + bridge.entities().size() + " entity(s)");
+        }
+    }
+
+    private static int tpsByName(String name, @Nullable Integer tps) {
+        List<SchematicPlacement> found = collectLoadedPlacements().stream()
+                .filter(placement -> placement.getName().equals(name)).toList();
+        if (found.size() != 1) {
+            sendFeedback(found.isEmpty() ? "没有名为 '" + name + "' 的放置。" : "放置名称重复，请先改名：" + name);
+            return 0;
+        }
+        try {
+            SimulationManager manager = SimulationManager.getInstance();
+            if (tps != null) manager.setTps(found.getFirst(), tps);
+            sendFeedback(manager.describeTps(found.getFirst()));
+            return 1;
+        } catch (Exception e) {
+            sendFeedback("TPS 设置失败：" + e.getMessage());
+            return 0;
         }
     }
 

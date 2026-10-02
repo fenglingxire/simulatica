@@ -73,7 +73,7 @@ public final class ProjectionBridge {
 
     private final SimulationLevel level;
     private SimulationRegion region;
-    private final String label;
+    private String label;
 
     @Nullable
     private SimulationViewer viewer;
@@ -82,7 +82,7 @@ public final class ProjectionBridge {
     private final Set<UUID> published = new HashSet<>();
 
     /** Where each tracked entity was last seen, and whether it was already dying then. */
-    private record SeenEntity(BlockPos pos, boolean dying) {
+    private record SeenEntity(Entity entity, BlockPos pos, boolean dying) {
     }
 
     private final java.util.Map<UUID, SeenEntity> lastSeen = new java.util.HashMap<>();
@@ -99,6 +99,7 @@ public final class ProjectionBridge {
     private final java.util.Map<UUID, Long> publishedChunks = new java.util.HashMap<>();
     private final Set<BlockPos> dirtyBlockEntities = new LinkedHashSet<>();
     private final Set<BlockPos> animated = new LinkedHashSet<>();
+    private final Set<BlockPos> dirtyBlocks = new LinkedHashSet<>();
     private static final int PROJECTION_FLAGS = Block.UPDATE_CLIENTS | Block.UPDATE_SKIP_ALL_SIDEEFFECTS;
 
     private static final double ENTITY_TRACKING_MARGIN = 16.0;
@@ -124,6 +125,8 @@ public final class ProjectionBridge {
     public String label() {
         return this.label;
     }
+
+    public void setLabel(String label) { this.label = label; }
 
     void setViewer(@Nullable SimulationViewer viewer) {
         if (this.viewer != null) {
@@ -360,12 +363,15 @@ public final class ProjectionBridge {
         if (packet instanceof ClientboundLevelParticlesPacket particles) {
             spawnParticles(client, particles);
         } else if (packet instanceof ClientboundLevelEventPacket event) {
+            if (!this.level.allowLevelEvent(event.getType())) return;
             client.levelEvent(null, event.getType(), event.getPos(), event.getData());
         } else if (packet instanceof ClientboundSoundPacket sound) {
+            if (!this.level.allowSound(sound.getSound().value())) return;
             // Regions are mapped with a zero offset, so sim coordinates are world coordinates.
             client.playLocalSound(sound.getX(), sound.getY(), sound.getZ(), sound.getSound().value(),
                     sound.getSource(), sound.getVolume(), sound.getPitch(), false);
         } else if (packet instanceof ClientboundSoundEntityPacket entitySound) {
+            if (!this.level.allowSound(entitySound.getSound().value())) return;
             Entity entity = this.level.getEntity(entitySound.getId());
             if (entity != null) {
                 client.playLocalSound(entity.getX(), entity.getY(), entity.getZ(),
@@ -528,6 +534,15 @@ public final class ProjectionBridge {
     }
 
     void onBlockChanged(BlockPos sim) {
+        this.dirtyBlocks.add(sim.immutable());
+    }
+
+    private void flushBlocks() {
+        for (BlockPos sim : this.dirtyBlocks) mirrorBlock(sim);
+        this.dirtyBlocks.clear();
+    }
+
+    private void mirrorBlock(BlockPos sim) {
         WorldSchematic projection = SchematicWorldHandler.getSchematicWorld();
         if (projection == null) {
             return;
@@ -613,12 +628,9 @@ public final class ProjectionBridge {
         if (source instanceof PistonMovingBlockEntity && target instanceof PistonMovingBlockEntity) {
             ((SimPistonMovingBlockEntityAccessor) target).sim$setProgressO(
                     ((SimPistonMovingBlockEntityAccessor) source).sim$getProgressO());
+            ((SimPistonMovingBlockEntityAccessor) target).sim$setProgress(
+                    ((SimPistonMovingBlockEntityAccessor) source).sim$getProgress());
         }
-    }
-
-    private static boolean isFinishedPiston(BlockEntity target) {
-        return target instanceof PistonMovingBlockEntity
-                && ((SimPistonMovingBlockEntityAccessor) target).sim$getProgress() >= 1.0F;
     }
 
     private void tickProjectionBlockEntities() {
@@ -642,7 +654,8 @@ public final class ProjectionBridge {
             }
 
             BlockState state = target.getBlockState();
-            if (!(state.getBlock() instanceof EntityBlock entityBlock) || isFinishedPiston(target)) {
+            // Piston progress comes from the simulation; a second tick would advance it twice.
+            if (!(state.getBlock() instanceof EntityBlock entityBlock) || target instanceof PistonMovingBlockEntity) {
                 continue;
             }
 
@@ -663,6 +676,13 @@ public final class ProjectionBridge {
     }
 
     void syncToProjection() {
+        flushBlocks();
+        for (BlockPos world : this.animated) {
+            BlockPos sim = this.region.toSim(world);
+            if (this.level.getBlockEntity(sim) instanceof PistonMovingBlockEntity) {
+                this.dirtyBlockEntities.add(sim);
+            }
+        }
         flushBlockEntities();
         tickProjectionBlockEntities();
         publishEntities();
@@ -720,7 +740,7 @@ public final class ProjectionBridge {
                 live = new HashSet<>();
             }
             live.add(uuid);
-            this.lastSeen.put(uuid, new SeenEntity(entity.blockPosition(),
+            this.lastSeen.put(uuid, new SeenEntity(entity, entity.blockPosition(),
                     entity instanceof LivingEntity living && living.isDeadOrDying()));
         }
 
@@ -729,7 +749,7 @@ public final class ProjectionBridge {
                 // Dying is expected; vanishing while alive is not -- log where the entity was
                 // last seen so a boundary escape can be pinpointed from the log.
                 SeenEntity seen = this.lastSeen.remove(uuid);
-                if (seen == null || !seen.dying()) {
+                if (seen == null || (!seen.dying() && !seen.entity().isRemoved())) {
                     Simulatica.LOGGER.warn("[Simulatica] Entity {} left '{}' while alive, last seen at {}",
                             uuid, this.label, seen != null ? seen.pos() : "unknown");
                 }
@@ -812,9 +832,9 @@ public final class ProjectionBridge {
     }
 
     @Nullable
-    static ProjectionBridge covering(Iterable<ProjectionBridge> bridges, BlockPos sim) {
+    static ProjectionBridge covering(Iterable<ProjectionBridge> bridges, SimulationLevel level, BlockPos sim) {
         for (ProjectionBridge bridge : bridges) {
-            if (bridge.region.containsSim(sim)) {
+            if (bridge.level == level && bridge.region.containsSim(sim)) {
                 return bridge;
             }
         }

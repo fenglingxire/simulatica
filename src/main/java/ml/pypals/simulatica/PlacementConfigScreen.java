@@ -29,12 +29,22 @@ public final class PlacementConfigScreen extends Screen {
     private static final int COLOR_HEADER = 0xFF55FFFF;
     private static final int COLOR_DIM = 0xFFAAAAAA;
 
+    // 假人行：名字列 + 四个按钮列。四列宽度写死，每个假人行的列 x 完全一致，
+    // 这样多个假人之间纵向严格成列；名字列宽度取所有名字里最宽的那个，
+    // 所以名字再长也不会把右边的按钮推着往右跑。
+    private static final int GAP = 4;
+    private static final int[] BOT_SLOT_WIDTHS = {46, 46, 70, 46};
+
     private final SchematicPlacement placement;
     private final List<Button> botButtons = new ArrayList<>();
     private final List<NameTag> botNameTags = new ArrayList<>();
+    /** 每个可视行按钮的 y，索引 = 可视行号（不含 scrollOffset）。绘制名字时按它对齐。 */
+    private final List<Integer> botTagY = new ArrayList<>();
     private boolean actionsExpanded = false;
     private int scrollOffset;
     private int botListTop;
+    /** 假人行第一个按钮的 x（名字列之后）。所有行共用，保证纵向成列。 */
+    private int botRowX;
 
     private int flowX;
     private int flowY;
@@ -47,7 +57,8 @@ public final class PlacementConfigScreen extends Screen {
     private boolean sprinting = false;
     private boolean forward = false;
 
-    private record NameTag(int x, int y, String text) {}
+    /** 假人名字标签。y 不存这里，由 {@link #botTagY} 每个可视行现算，滚动时才跟得上。 */
+    private record NameTag(int x, String text) {}
 
     public PlacementConfigScreen(SchematicPlacement placement) {
         super(Component.literal("投影配置 - " + placement.getName()));
@@ -58,6 +69,8 @@ public final class PlacementConfigScreen extends Screen {
     protected void init() {
         this.botButtons.clear();
         this.botNameTags.clear();
+        this.botTagY.clear();
+        this.botListTop = 0;
         this.scrollOffset = 0;
         this.flowX = PADDING;
         this.flowY = 36;
@@ -217,64 +230,115 @@ public final class PlacementConfigScreen extends Screen {
         this.flowY += 4;
         this.botListTop = this.flowY;
 
-        for (BotManager.Bot bot : BotManager.botsOf(this.placement)) {
+        List<BotManager.Bot> bots = BotManager.botsOf(this.placement);
+
+        // 先量一遍所有名字，取最宽的那个当名字列宽度。名字列宽度必须与具体某个
+        // 名字无关，否则每个假人行的按钮起点都会跟着各自名字的长度左右移动。
+        int nameColWidth = 0;
+        for (BotManager.Bot bot : bots) {
+            nameColWidth = Math.max(nameColWidth, this.font.width(bot.name()));
+        }
+        int avail = this.width - 2 * PADDING;
+        int btnRunWidth = 0;
+        for (int w : BOT_SLOT_WIDTHS) {
+            btnRunWidth += w + GAP;
+        }
+        btnRunWidth -= GAP; // 最后一列后面没有间距
+        // 窗口宽度连「左右边距 + 四列按钮」都放不下时（四列 46+46+70+46 + 三个 4px
+        // 间距 = 224），只能连左边距一起压缩让按钮居中。名字列此时为 0，名字会和
+        // 第一个按钮重叠——可接受的降级，因为按钮才是能点的东西。
+        int leftPad = PADDING;
+        if (btnRunWidth > avail) {
+            leftPad = Math.max(0, (this.width - btnRunWidth) / 2);
+        }
+        int nameCol;
+        if (nameColWidth + GAP + btnRunWidth <= this.width - leftPad - PADDING) {
+            nameCol = nameColWidth + GAP;
+        } else {
+            nameCol = Math.max(0, this.width - leftPad - PADDING - btnRunWidth);
+        }
+        this.botRowX = leftPad + nameCol;
+
+        for (BotManager.Bot bot : bots) {
             this.newRow();
 
-            String name = bot.name();
-            int nameWidth = this.font.width(name) + 6;
-            this.botNameTags.add(new NameTag(this.flowX, this.flowY + 6, name));
-            this.flowX += nameWidth + 4;
+            this.botNameTags.add(new NameTag(leftPad, bot.name()));
 
-            Button backpack = Button.builder(Component.literal("背包"),
-                            button -> Minecraft.getInstance().gui.setScreen(new BotInventoryScreen(bot.player())))
-                    .bounds(this.flowX, 0, 46, 20).build();
-            this.botButtons.add(addRenderableWidget(backpack));
-            this.flowX += 50;
-
-            Button teleport = Button.builder(Component.literal("传送"),
-                            button -> BotManager.teleportToPlayer(bot))
-                    .bounds(this.flowX, 0, 46, 20).build();
-            this.botButtons.add(addRenderableWidget(teleport));
-            this.flowX += 50;
-
-            Button mode = Button.builder(Component.literal("模式:" + modeName(bot.player())),
-                            button -> {
-                                bot.player().setGameMode(nextMode(bot.player()));
-                                button.setMessage(Component.literal("模式:" + modeName(bot.player())));
-                            })
-                    .bounds(this.flowX, 0, 70, 20).build();
-            this.botButtons.add(addRenderableWidget(mode));
-            this.flowX += 74;
-
-            Button remove = Button.builder(Component.literal("移除"),
-                            button -> {
-                                BotManager.remove(this.placement, bot);
-                                rebuild();
-                            })
-                    .bounds(this.flowX, 0, 46, 20).build();
-            this.botButtons.add(addRenderableWidget(remove));
-            this.flowX += 50;
+            int x = this.botRowX;
+            for (int i = 0; i < BOT_SLOT_WIDTHS.length; i++) {
+                this.botButtons.add(addRenderableWidget(
+                        botSlot(bot, i, x, BOT_SLOT_WIDTHS[i])));
+                x += BOT_SLOT_WIDTHS[i] + GAP;
+            }
         }
         layoutBotRows();
     }
 
+    /** 按列序号建第 {@code slot} 列的按钮（0=背包 1=传送 2=模式 3=移除）。 */
+    private Button botSlot(BotManager.Bot bot, int slot, int x, int width) {
+        Component label = switch (slot) {
+            case 0 -> Component.literal("背包");
+            case 1 -> Component.literal("传送");
+            case 2 -> Component.literal("模式:" + modeName(bot.player()));
+            default -> Component.literal("移除");
+        };
+        Button button = Button.builder(label, b -> onBotSlot(bot, slot, b))
+                .bounds(x, 0, width, 20).build();
+        return button;
+    }
+
+    private void onBotSlot(BotManager.Bot bot, int slot, Button button) {
+        switch (slot) {
+            case 0 -> Minecraft.getInstance().gui.setScreen(new BotInventoryScreen(bot.player()));
+            case 1 -> BotManager.teleportToPlayer(bot);
+            case 2 -> {
+                bot.player().setGameMode(nextMode(bot.player()));
+                button.setMessage(Component.literal("模式:" + modeName(bot.player())));
+            }
+            default -> {
+                BotManager.remove(this.placement, bot);
+                rebuild();
+            }
+        }
+    }
+
     private void layoutBotRows() {
+        if (this.botListTop == 0) {
+            return;
+        }
         int visible = visibleBotRows();
         for (int i = 0; i < this.botButtons.size(); i++) {
-            int botIndex = i / 4;
+            int botIndex = i / BOT_SLOT_WIDTHS.length;
             Button row = this.botButtons.get(i);
             int slot = botIndex - this.scrollOffset;
             boolean shown = slot >= 0 && slot < visible;
             row.visible = shown;
             row.active = shown;
             if (shown) {
-                row.setY(this.botListTop + slot * ROW_HEIGHT + 1);
+                row.setY(botRowY(slot));
             }
+        }
+        this.botTagY.clear();
+        for (int slot = 0; slot < visible; slot++) {
+            this.botTagY.add(botRowY(slot));
         }
     }
 
+    /** 第 {@code slot} 个可视行里，按钮的 y。名字标签在此基础上 +6 做视觉居中。 */
+    private int botRowY(int slot) {
+        return this.botListTop + slot * ROW_HEIGHT + 1;
+    }
+
+    /** 假人列表的可视区下边界。绘制时的 scissor 和行数计算必须共用它，否则会画出框外。 */
+    private int botListBottom() {
+        return this.height - 20;
+    }
+
     private int visibleBotRows() {
-        return Math.max(1, (this.height - 20 - this.botListTop) / ROW_HEIGHT);
+        if (this.botListTop <= 0) {
+            return 1;
+        }
+        return Math.max(1, (botListBottom() - this.botListTop) / ROW_HEIGHT);
     }
 
     private int maxBotScroll() {
@@ -284,7 +348,7 @@ public final class PlacementConfigScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
-        if (maxBotScroll() > 0 && mouseY >= this.botListTop) {
+        if (maxBotScroll() > 0 && mouseY >= this.botListTop && mouseY < botListBottom()) {
             this.scrollOffset = Math.max(0, Math.min(maxBotScroll(), this.scrollOffset - (int) Math.signum(scrollY)));
             layoutBotRows();
             return true;
@@ -345,9 +409,16 @@ public final class PlacementConfigScreen extends Screen {
 
         extractor.text(this.font, "假人联动（Carpet，单个投影）", PADDING, 36 - 12, COLOR_HEADER);
 
+        extractor.enableScissor(0, this.botListTop, this.width, this.botListBottom());
+        int slot = 0;
         for (NameTag tag : this.botNameTags) {
-            extractor.text(this.font, tag.text(), tag.x(), tag.y(), COLOR_TEXT);
+            int row = slot - this.scrollOffset;
+            if (row >= 0 && row < this.botTagY.size()) {
+                extractor.text(this.font, tag.text(), tag.x(), this.botTagY.get(row) + 6, COLOR_TEXT);
+            }
+            slot++;
         }
+        extractor.disableScissor();
     }
 
     @Override

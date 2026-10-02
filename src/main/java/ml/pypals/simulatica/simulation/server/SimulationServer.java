@@ -17,6 +17,7 @@ import net.minecraft.core.MappedRegistry;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.ReloadableServerResources;
 import net.minecraft.server.Services;
@@ -92,6 +93,8 @@ public final class SimulationServer extends MinecraftServer {
 
     private final LevelStorageSource.LevelStorageAccess storage;
     private final List<ProjectionBridge> bridges = new ArrayList<>();
+    private int nextProjectionId;
+    private int nextTickingLevel;
 
     private final ReloadableServerResources dataPackResources;
     private final LocalSampleLogger tickTimeLogger = new LocalSampleLogger(1);
@@ -297,9 +300,31 @@ public final class SimulationServer extends MinecraftServer {
 
         for (ServerLevel level : this.getAllLevels()) {
             SimulationLevel simulationLevel = (SimulationLevel) level;
-            simulationLevel.addBlockChangeListener(this::onBlockChanged);
-            simulationLevel.addBlockEntityChangeListener(this::onBlockEntityChanged);
+            listen(simulationLevel);
         }
+    }
+
+    private void listen(SimulationLevel level) {
+        level.addBlockChangeListener(pos -> onBlockChanged(level, pos));
+        level.addBlockEntityChangeListener(pos -> onBlockEntityChanged(level, pos));
+    }
+
+    /** One vanilla world per placement, with the source dimension's physical properties. */
+    public SimulationLevel createProjectionLevel(ResourceKey<Level> sourceDimension, String name) {
+        Registry<LevelStem> stems = registryAccess().lookupOrThrow(Registries.LEVEL_STEM);
+        LevelStem stem = stems.getValue(ResourceKey.create(Registries.LEVEL_STEM, sourceDimension.identifier()));
+        if (stem == null) stem = stems.getValueOrThrow(LevelStem.OVERWORLD);
+        ResourceKey<Level> key = ResourceKey.create(Registries.DIMENSION,
+                Identifier.fromNamespaceAndPath(Simulatica.MOD_ID, "projection/" + nextProjectionId++));
+        LevelSettings settings = new LevelSettings(name, GameType.CREATIVE,
+                LevelSettings.DifficultySettings.DEFAULT, true, WorldDataConfiguration.DEFAULT);
+        PrimaryLevelData data = new PrimaryLevelData(settings, PrimaryLevelData.SpecialWorldProperty.FLAT, Lifecycle.stable());
+        SimulationLevel level = new SimulationLevel(this, Util.backgroundExecutor(), storage, data, key, stem,
+                BiomeManager.obfuscateSeed(SEED), List.of(), true);
+        level.setProjectionName(name);
+        listen(level);
+        ((MinecraftServerLevelsAccessor) (Object) this).simulatica$levels().put(key, level);
+        return level;
     }
 
     // =========================================================================
@@ -316,7 +341,12 @@ public final class SimulationServer extends MinecraftServer {
      */
     public ProjectionBridge attach(ResourceKey<Level> dimension, BlockPos worldMin, BlockPos worldMax,
                                    String label, Set<UUID> preserved) {
-        SimulationLevel level = this.levelFor(dimension);
+        return attach(levelFor(dimension), worldMin, worldMax, label, preserved);
+    }
+
+    public ProjectionBridge attach(SimulationLevel level, BlockPos worldMin, BlockPos worldMax,
+                                   String label, Set<UUID> preserved) {
+        ResourceKey<Level> dimension = level.dimension();
         SimulationRegion region = this.allocate(dimension, worldMin, worldMax, label);
 
         ChunkPos min = region.simChunkMin();
@@ -336,6 +366,7 @@ public final class SimulationServer extends MinecraftServer {
 
         // Saved entities are not in the level yet -- only live leftovers and fresh copies are.
         present.removeAll(saved);
+        for (UUID uuid : saved) if (level.getEntity(uuid) != null) present.add(uuid);
         LeftoverStore.load(label, level, present);
 
         if (copied == 0) {
@@ -448,15 +479,16 @@ public final class SimulationServer extends MinecraftServer {
      */
     private void release(SimulationLevel level, SimulationRegion region) {
         forEachChunk(region, (cx, cz) -> {
-            if (!requiredByAttachedRegion(cx, cz)) {
+            if (!requiredByAttachedRegion(level, cx, cz)) {
                 level.setChunkForced(cx, cz, false);
             }
         });
     }
 
-    private boolean requiredByAttachedRegion(int chunkX, int chunkZ) {
+    private boolean requiredByAttachedRegion(SimulationLevel level, int chunkX, int chunkZ) {
         for (int i = 0; i < this.bridges.size(); i++) {
             SimulationRegion other = this.bridges.get(i).region();
+            if (this.bridges.get(i).level() != level) continue;
             ChunkPos min = other.simChunkMin();
             ChunkPos max = other.simChunkMax();
             if (chunkX >= min.x() - TICKING_MARGIN_CHUNKS && chunkX <= max.x() + TICKING_MARGIN_CHUNKS
@@ -492,15 +524,15 @@ public final class SimulationServer extends MinecraftServer {
         return this.bridges;
     }
 
-    private void onBlockChanged(BlockPos sim) {
-        ProjectionBridge bridge = ProjectionBridge.covering(this.bridges, sim);
+    private void onBlockChanged(SimulationLevel level, BlockPos sim) {
+        ProjectionBridge bridge = ProjectionBridge.covering(this.bridges, level, sim);
         if (bridge != null) {
             bridge.onBlockChanged(sim);
         }
     }
 
-    private void onBlockEntityChanged(BlockPos sim) {
-        ProjectionBridge bridge = ProjectionBridge.covering(this.bridges, sim);
+    private void onBlockEntityChanged(SimulationLevel level, BlockPos sim) {
+        ProjectionBridge bridge = ProjectionBridge.covering(this.bridges, level, sim);
         if (bridge != null) {
             bridge.onBlockEntityChanged(sim);
         }
@@ -511,15 +543,37 @@ public final class SimulationServer extends MinecraftServer {
     // =========================================================================
 
     public void tickSimulation() {
+        for (ServerLevel level : getAllLevels()) ((SimulationLevel) level).beginClientTick();
         grantTaskBudget();
         this.runAllTasks();
         for (ServerLevel level : this.getAllLevels()) {
+            if (((SimulationLevel) level).projectionName() != null) continue;
             drainChunkSource(level);
             level.tick(() -> true);
+        }
+        List<SimulationLevel> ticking = this.bridges.stream().map(ProjectionBridge::level)
+                .filter(level -> level.projectionName() != null).distinct().toList();
+        long now = System.nanoTime();
+        long deadline = System.nanoTime() + 10_000_000L;
+        for (SimulationLevel level : ticking) level.clock.accrue(now);
+        int idle = 0;
+        while (!ticking.isEmpty() && idle < ticking.size() && System.nanoTime() < deadline) {
+            SimulationLevel level = ticking.get(Math.floorMod(nextTickingLevel++, ticking.size()));
+            if (!level.clock.due()) { idle++; continue; }
+            idle = 0;
+            grantTaskBudget();
+            drainChunkSource(level);
+            level.tickRateManager().tick();
+            level.tick(() -> true);
+            level.clock.advanced();
         }
         for (int i = 0; i < this.bridges.size(); i++) {
             this.bridges.get(i).syncToProjection();
         }
+    }
+
+    public void suspendClocks() {
+        for (ServerLevel level : getAllLevels()) ((SimulationLevel) level).clock.suspend();
     }
 
     /**
@@ -544,6 +598,12 @@ public final class SimulationServer extends MinecraftServer {
             }
         }
         return false;
+    }
+
+    public boolean isSimulatedChunk(SimulationLevel level, int chunkX, int chunkZ) {
+        return bridges.stream().anyMatch(bridge -> bridge.level() == level
+                && chunkX >= bridge.region().simChunkMin().x() && chunkX <= bridge.region().simChunkMax().x()
+                && chunkZ >= bridge.region().simChunkMin().z() && chunkZ <= bridge.region().simChunkMax().z());
     }
 
     private void grantTaskBudget() {
