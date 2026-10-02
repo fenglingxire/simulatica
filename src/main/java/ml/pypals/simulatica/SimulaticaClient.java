@@ -80,6 +80,7 @@ public class SimulaticaClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         ml.pypals.simulatica.config.SimulaticaConfigs.initialize();
+        ml.pypals.simulatica.gui.SimulaticaConfigScreen.register();
         registerTickEvent();
         registerCommands();
         registerShutdown();
