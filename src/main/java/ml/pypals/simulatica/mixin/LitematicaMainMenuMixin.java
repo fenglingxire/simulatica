@@ -31,12 +31,10 @@ public abstract class LitematicaMainMenuMixin {
         boolean projectsShown = Configs.Generic.UNHIDE_SCHEMATIC_PROJECTS.getBooleanValue();
         int y = projectsShown ? 184 : 162;
 
-        ButtonGeneric button = new ButtonGeneric(x, y, width, 20, "投影交互菜单");
-        self.addButton(button, (btn, mouseButton) -> {
-            if (ml.pypals.simulatica.workshop.WorkshopManager.isActive()) {
-                ml.pypals.simulatica.workshop.WorkshopManager.requestReturn();
-            } else Minecraft.getInstance().gui.setScreen(new SimulaticaMenuScreen());
-        });
+        ButtonGeneric button = new ButtonGeneric(x, y, width, 20,
+                fi.dy.masa.malilib.util.StringUtils.translate("simulatica.ui.menu_entry"));
+        self.addButton(button, (btn, mouseButton) ->
+                Minecraft.getInstance().gui.setScreen(new SimulaticaMenuScreen()));
     }
 
     @Invoker("getButtonWidth")

@@ -5,520 +5,606 @@ import com.mojang.brigadier.context.StringRange;
 import com.mojang.brigadier.suggestion.Suggestion;
 import fi.dy.masa.litematica.data.DataManager;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
+import fi.dy.masa.malilib.gui.GuiConfigsBase;
+import fi.dy.masa.malilib.gui.GuiTextFieldGeneric;
+import fi.dy.masa.malilib.gui.LeftRight;
+import fi.dy.masa.malilib.gui.MaLiLibIcons;
+import fi.dy.masa.malilib.gui.button.ButtonGeneric;
+import fi.dy.masa.malilib.gui.widgets.WidgetListBase;
+import fi.dy.masa.malilib.gui.widgets.WidgetListConfigOptions;
+import fi.dy.masa.malilib.gui.widgets.WidgetListEntryBase;
+import fi.dy.masa.malilib.gui.widgets.WidgetSearchBar;
+import fi.dy.masa.malilib.render.GuiContext;
+import fi.dy.masa.malilib.util.StringUtils;
 import ml.pypals.simulatica.carpet.BotManager;
 import ml.pypals.simulatica.carpet.CarpetIntegration;
 import ml.pypals.simulatica.counter.HopperCounter;
+import ml.pypals.simulatica.config.SimulaticaConfigs;
 import ml.pypals.simulatica.simulation.SimulationManager;
 import ml.pypals.simulatica.simulation.server.SimulationCommands;
-import ml.pypals.simulatica.workshop.WorkshopManager;
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
-import net.minecraft.client.gui.components.AbstractWidget;
-import net.minecraft.client.gui.components.Button;
-import net.minecraft.client.gui.components.EditBox;
-import net.minecraft.client.gui.components.Renderable;
-import net.minecraft.client.gui.components.events.GuiEventListener;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.input.CharacterEvent;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonEvent;
+import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.level.GameType;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.EnumMap;
 import java.util.List;
-import java.util.Optional;
+import java.util.Locale;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
-/**
- * [SIMULATICA-修改] 游戏内控制面板（裸输 /simulatica 打开）。
- *
- * <p>左右分类：左列「全局操作」+「世界调整」（折叠）+「假人全局」（Carpet 加载时显示，含批量清理/传送/
- * 停止动作）+ 底部指令输入栏，整列支持滚轮滚动与滑块拖动；右列「单个投影」启停列表（滚轮翻页 + 滑块）。</p>
- *
- * <h2>布局不变量（改这个文件时请保持）</h2>
- * <ol>
- *   <li>左右两列宽度按屏幕宽度自适应：左列取 {@link #LEFT_WIDTH}（窄屏时收缩到
- *       {@link #MIN_LEFT_WIDTH}），剩下的宽度归右列，右列至少留 {@link #MIN_LIST_WIDTH}
- *       以放得下「配置」+「启动/停止」两个按钮。任何宽度下两列内容都不相交。</li>
- *   <li>滚动条画在列的**外侧**（左列滑块在按钮右边缘之外、右列滑块在按钮右边缘之外），
- *       不会压住按钮。</li>
- *   <li>每个分区标题独占一行（{@link #HEADER_H}），不再与上一个分区最后一个按钮重叠；
- *       且第一行标题落在左列裁剪区上边界 {@link #LEFT_TOP} 之内，因此不会被裁掉。</li>
- *   <li>顶部状态行（y=28，居中）与右列标题（y={@link #LEFT_TOP}）不在同一行，互不遮挡。</li>
- *   <li>左列可滚动区底部预留 {@link #LEFT_LABEL_H}，保证底部固定文字「模拟世界指令」
- *       不会压住最后一个可见按钮；该文字与「发送」按钮同样不重叠。</li>
- *   <li>左列按钮由 {@link #extractRenderState} 手动包在
- *       {@code [0, LEFT_TOP] ~ [listX, leftBottom]} 的裁剪区里绘制。因此按钮只露出一部分时
- *       可以照画（滚动平滑），露出去的部分由裁剪区切掉，不会压到上方分区标题或底部指令栏。
- *       <b>改这里时必须同时保留裁剪，否则半露按钮会溢出到可视区之外。</b></li>
- * </ol>
- */
-public final class SimulaticaMenuScreen extends Screen {
-
-    private static final int PADDING = 16;
-    private static final int ROW_HEIGHT = 22;
-    private static final int LEFT_WIDTH = 200;
-    private static final int MIN_LEFT_WIDTH = 96;
-    private static final int MIN_LIST_WIDTH = 148;
-    private static final int COLUMN_GAP = 24;
-    private static final int SCROLLBAR_WIDTH = 5;
-    private static final int SCROLLBAR_GUTTER = SCROLLBAR_WIDTH + 4;
-    private static final int LEFT_TOP = 40;
-    private static final int BOTTOM_MARGIN = 44;
-    private static final int LEFT_LABEL_H = 12;
-    private static final int HEADER_H = 14;
-    private static final int SECTION_GAP = 8;
+/** malilib-style simulation controls; a placement-scoped child reuses the bot rows. */
+public class SimulaticaMenuScreen extends GuiConfigsBase {
+    private static final int PADDING = 10;
+    private static final int GAP = 4;
     private static final int BTN_H = 20;
-    private static final int CFG_BTN_W = 48;
-    private static final int ROW_BTN_W = 56;
-    private static final int CMD_BTN_W = 46;
     private static final int COLOR_TEXT = 0xFFFFFFFF;
-    private static final int COLOR_HEADER = 0xFF55FFFF;
     private static final int COLOR_DIM = 0xFFAAAAAA;
     private static final int COLOR_TRACK = 0x33000000;
     private static final int COLOR_THUMB = 0xCC888888;
+    private static final int[] INTERVALS = {0, -1, 1, 2, 5, 10, 20};
 
+    private enum Page { PROJECTIONS, GENERAL, WORLD, COUNTERS, BOTS, ACTIONS }
+    private record ListState(String search, boolean open, int scroll) {}
+    private record Control(Supplier<String> text, Runnable run, BooleanSupplier enabled,
+                           String hint, int width) {}
+    private record Entry(String search, Supplier<String> label, List<Control> controls) {}
+
+    private final SchematicPlacement placement;
+    private Page page;
+    private final EnumMap<Page, ListState> listStates = new EnumMap<>(Page.class);
     private final List<SchematicPlacement> placements = new ArrayList<>();
-    private final List<Button> placementButtons = new ArrayList<>();
-    private final List<Button> configButtons = new ArrayList<>();
+    private final List<ButtonGeneric> toolbarButtons = new ArrayList<>();
+    private final List<Control> toolbarControls = new ArrayList<>();
+    private ControlsList content;
+    private List<Object> dataStamp = List.of();
+    private int contentTop;
+    private int flowX;
+    private int flowY;
+    private final int[] intervals = {0, 0, 0};
+    private final boolean[] movement = {false, false, false};
 
-    // 左列滚动（按像素）
-    private final List<Button> leftWidgets = new ArrayList<>();
-    private final List<Integer> leftBaseY = new ArrayList<>();
-    private final List<Header> leftHeaders = new ArrayList<>();
-    private int leftNextY;
-    private int leftContentHeight;
-    private int leftScroll;
-    private boolean worldExpanded = false;
-
-    // 右列滚动（按行）
-    private int scrollOffset;
-    private int listX;
-    private int listWidth;
-
-    // 自适应尺寸（init 时按屏幕宽度算好）
-    private int leftWidth = LEFT_WIDTH;
-    private int leftBottom = LEFT_TOP;
-
-    // 滑块拖拽状态
-    private boolean draggingLeft = false;
-    private boolean draggingRight = false;
-
-    // 指令栏 TAB 补齐状态
-    private EditBox commandField;
+    private GuiTextFieldGeneric commandField;
     private List<Suggestion> tabCandidates = List.of();
-    private int tabCursor = 0;
-    private int tabScroll = 0;
-    /** 候选表是对这一段文本（光标前的内容）算出来的，替换必须回到这段文本上做。 */
-    private String tabBase = null;
-    /** 算候选时光标后面的内容，补全后要原样接回去。 */
+    private int tabCursor;
+    private int tabScroll;
+    private String tabBase;
     private String tabSuffix = "";
-    /** 上一次补全后光标前的内容，用来识别「连续按 TAB 应该循环候选」。 */
-    private String tabApplied = null;
+    private String tabApplied;
+    private int completionRequest;
 
-    private record Header(String text, int baseY) {}
+    public SimulaticaMenuScreen() { this(null, null); }
 
-    public SimulaticaMenuScreen() {
-        super(Component.literal("Simulatica 控制面板"));
+    protected SimulaticaMenuScreen(SchematicPlacement placement, Screen parent) {
+        super(10, 60, Simulatica.MOD_ID, parent, "simulatica.ui.title");
+        this.placement = placement;
+        this.page = placement == null ? Page.PROJECTIONS : Page.BOTS;
+        setParent(parent);
+        this.useTitleHierarchy = false;
+    }
+
+    private static String tr(String key, Object... args) {
+        return StringUtils.translate("simulatica.ui." + key, args);
     }
 
     @Override
-    protected void init() {
+    protected WidgetListConfigOptions createListWidget(int x, int y) { return null; }
+    @Override
+    public List<ConfigOptionWrapper> getConfigs() {
+        return ConfigOptionWrapper.createFor(List.of(SimulaticaConfigs.TPS_HUD, SimulaticaConfigs.TPS_MULTILINE));
+    }
+    @Override
+    protected void buildConfigSwitcher() {
+        if (this.placement == null) {
+            super.buildConfigSwitcher();
+        } else {
+            // malilib matches factories by exact screen class. Reuse its registered main
+            // screen's native switcher without registering the child as another mod.
+            SimulaticaMenuScreen main = new SimulaticaMenuScreen();
+            main.buildConfigSwitcher();
+            this.modSwitchWidget = main.modSwitchWidget;
+            if (this.modSwitchWidget != null) addWidget(this.modSwitchWidget);
+        }
+    }
+
+    private void rememberList() {
+        if (this.content != null) {
+            this.listStates.put(this.page, new ListState(this.content.search.text(),
+                    this.content.search.isSearchOpen(), this.content.getScrollbar().getValue()));
+        }
+    }
+
+    private void selectPage(Page next) {
+        rememberList();
+        this.content = null;
+        this.page = next;
+        initGui();
+    }
+
+    @Override
+    public void initGui() {
+        rememberList();
+        String command = this.commandField == null ? "" : this.commandField.getValue();
+        int cursor = this.commandField == null ? 0 : this.commandField.getCursorPosition();
+        boolean focused = this.commandField != null && this.commandField.isFocused();
+        clearTabState();
+        super.initGui();
+        this.toolbarButtons.clear();
+        this.toolbarControls.clear();
         this.placements.clear();
         this.placements.addAll(DataManager.getSchematicPlacementManager().getAllSchematicsPlacements());
-        this.placementButtons.clear();
-        this.configButtons.clear();
-        this.leftWidgets.clear();
-        this.leftBaseY.clear();
-        this.leftHeaders.clear();
-        this.leftNextY = LEFT_TOP - SECTION_GAP;
-        this.scrollOffset = Math.min(this.scrollOffset, maxScroll());
-
-        layoutColumns();
-        buildLeftColumn();
-        this.leftScroll = Math.min(this.leftScroll, maxLeftScroll());
-        buildCommandField();
-        buildPlacementList();
-        layoutLeft();
-        layoutRows();
+        this.title = this.placement == null ? tr("title") : tr("placement_title", this.placement.getName());
+        this.flowX = PADDING;
+        this.flowY = 28;
+        Page[] pages = this.placement == null
+                ? new Page[]{Page.PROJECTIONS, Page.GENERAL, Page.WORLD, Page.COUNTERS, Page.BOTS}
+                : new Page[]{Page.BOTS, Page.ACTIONS};
+        for (Page next : pages) {
+            Control tab = control("tab." + next.name().toLowerCase(Locale.ROOT), () -> selectPage(next));
+            ButtonGeneric button = flowButton(tab);
+            button.setEnabled(this.page != next);
+        }
+        this.flowX = PADDING;
+        this.flowY += BTN_H + 6;
+        buildToolbar();
+        this.contentTop = this.flowY + (this.toolbarButtons.isEmpty() ? 0 : BTN_H + 4);
+        int bottom = this.height - (this.placement == null ? 32 : 10);
+        this.content = new ControlsList(PADDING, this.contentTop, this.width - 2 * PADDING,
+                Math.max(24, bottom - this.contentTop), entries());
+        this.content.initGui();
+        ListState saved = this.listStates.get(this.page);
+        if (saved != null) this.content.restore(saved);
+        this.dataStamp = currentDataStamp();
+        if (this.placement == null) {
+            int sendWidth = this.font.width(tr("send")) + 14;
+            int y = this.height - 25;
+            this.commandField = new GuiTextFieldGeneric(PADDING, y, this.width - 2 * PADDING - sendWidth - GAP, 18, this.font);
+            this.commandField.setMaxLength(256);
+            this.commandField.setHint(Component.literal(tr("command_hint")));
+            this.commandField.setValue(command);
+            this.commandField.setCursorPosition(Math.min(cursor, command.length()));
+            this.commandField.setHighlightPos(this.commandField.getCursorPosition());
+            this.commandField.setFocused(focused);
+            addButton(new ButtonGeneric(this.width - PADDING - sendWidth, y - 1, sendWidth, BTN_H, tr("send")),
+                    (button, mouseButton) -> { if (mouseButton == 0) sendCommand(); });
+        }
     }
 
-    /**
-     * 按屏幕宽度切分左右两列。窄屏优先保右列（右列放不下两个按钮就没法用了），
-     * 左列收缩到 {@link #MIN_LEFT_WIDTH} 为止。
-     */
-    private void layoutColumns() {
-        int avail = Math.max(0, this.width - PADDING * 2 - COLUMN_GAP - SCROLLBAR_GUTTER);
-        int left = Math.min(LEFT_WIDTH, Math.max(MIN_LEFT_WIDTH, avail - MIN_LIST_WIDTH));
-        this.leftWidth = Math.min(left, Math.max(MIN_LEFT_WIDTH, avail));
-        this.listX = PADDING + this.leftWidth + COLUMN_GAP;
-        this.listWidth = Math.max(0, this.width - this.listX - PADDING - SCROLLBAR_GUTTER);
-        this.leftBottom = this.height - BOTTOM_MARGIN - LEFT_LABEL_H;
+    private Control control(String key, Runnable run) {
+        return dynamic(() -> tr(key), run, () -> true, "", tr(key));
     }
 
-    // ------------------------------------------------------------------
-    // 左列构建（全局操作 + 世界调整 + 假人全局）
-    // ------------------------------------------------------------------
-    private void buildLeftColumn() {
-        addSection("全局操作");
-        addLeftButton("启动全部模拟", this.leftNextY, this.leftWidth, b -> startAllPlacements());
-        this.leftNextY += ROW_HEIGHT;
-        addLeftButton("停止全部模拟", this.leftNextY, this.leftWidth, b -> {
-            SimulationManager.getInstance().stopAll();
-            refreshPlacementButtons();
-        });
-        this.leftNextY += ROW_HEIGHT;
-        addLeftButton(absorbLabel(), this.leftNextY, this.leftWidth, b -> {
-            SimulationManager.getInstance().setItemAbsorption(null);
-            b.setMessage(absorbLabel());
-        });
-        this.leftNextY += ROW_HEIGHT;
-        addLeftButton("清除越界实体", this.leftNextY, this.leftWidth, b -> {
-            int removed = SimulationManager.getInstance().purgeEscapedEntities();
-            SimulaticaClient.sendFeedback(removed == 0
-                    ? "No escaped entities found."
-                    : "Purged " + removed + " escaped entities.");
-        });
-        this.leftNextY += ROW_HEIGHT;
+    private Control dynamic(Supplier<String> text, Runnable run, BooleanSupplier enabled, String hint, String... values) {
+        int width = this.font.width(text.get());
+        for (String value : values) width = Math.max(width, this.font.width(value));
+        return new Control(text, run, () -> !ml.pypals.simulatica.workshop.WorkshopManager.isActive()
+                && enabled.getAsBoolean(), hint, width + 12);
+    }
 
-        // 漏斗计数器
-        addSection("漏斗计数器");
-        addLeftButton("查看计数", this.leftNextY, this.leftWidth, b -> {
-            for (Component line : HopperCounter.formatAll()) {
-                SimulaticaClient.sendFeedback(line);
+    private Control botControl(String key, Runnable run) {
+        return dynamic(() -> tr(key), run, CarpetIntegration::isLoaded, tr("requires_carpet"));
+    }
+
+    private ButtonGeneric flowButton(Control control) {
+        int width = Math.min(control.width(), this.width - 2 * PADDING);
+        if (this.flowX > PADDING && this.flowX + width > this.width - PADDING) {
+            this.flowX = PADDING;
+            this.flowY += BTN_H + GAP;
+        }
+        ButtonGeneric button = new ButtonGeneric(this.flowX, this.flowY, width, BTN_H, control.text().get());
+        button.setEnabled(control.enabled().getAsBoolean());
+        if (!control.hint().isEmpty()) button.setHoverStrings(control.hint());
+        addButton(button, (b, mouseButton) -> { if (mouseButton == 0 && control.enabled().getAsBoolean()) control.run().run(); });
+        this.flowX += width + GAP;
+        return button;
+    }
+
+    private void toolbar(Control control) {
+        this.toolbarButtons.add(flowButton(control));
+        this.toolbarControls.add(control);
+    }
+
+    private void buildToolbar() {
+        if (this.page == Page.PROJECTIONS) {
+            toolbar(control("start_all", () -> this.placements.forEach(SimulationManager.getInstance()::startSimulation)));
+            toolbar(control("stop_all", () -> SimulationManager.getInstance().stopAll()));
+        } else if (this.page == Page.BOTS) {
+            if (this.placement != null) {
+                toolbar(dynamic(() -> tr("spawn"), this::spawnBot,
+                        () -> CarpetIntegration.isLoaded() && SimulationManager.getInstance().getSimulations(this.placement) != null
+                                && !SimulationManager.getInstance().getSimulations(this.placement).isEmpty(),
+                        tr("spawn_hint")));
             }
-        });
-        this.leftNextY += ROW_HEIGHT;
-        addLeftButton("重置计数", this.leftNextY, this.leftWidth, b -> {
-            HopperCounter.resetAll();
-            SimulaticaClient.sendFeedback("已重置所有漏斗计数器。");
-        });
-        this.leftNextY += ROW_HEIGHT;
-
-        // 世界调整（折叠）
-        addSection("世界调整");
-        addLeftButton(this.worldExpanded ? "收起世界调整" : "展开世界调整", this.leftNextY, this.leftWidth, b -> {
-            this.worldExpanded = !this.worldExpanded;
-            rebuild();
-        });
-        this.leftNextY += ROW_HEIGHT;
-        if (this.worldExpanded) {
-            addWorldRow("时间:白天", "/time set day", "时间:夜晚", "/time set night", "时间:正午", "/time set noon");
-            addWorldRow("时间:午夜", "/time set midnight", "难度:和平", "/difficulty peaceful", "难度:简单", "/difficulty easy");
-            addWorldRow("难度:普通", "/difficulty normal", "难度:困难", "/difficulty hard", "天气:晴", "/weather clear");
-            addWorldRow("天气:雨", "/weather rain", "天气:雷", "/weather thunder", null, null);
+            toolbar(botControl("remove_all", () -> {
+                if (this.placement == null) BotManager.removeAllGlobally(); else BotManager.removeAll(this.placement);
+            }));
+            toolbar(botControl("teleport_all", () -> {
+                if (this.placement == null) BotManager.teleportAllToPlayer();
+                else BotManager.botsOf(this.placement).forEach(BotManager::teleportToPlayer);
+            }));
+            toolbar(botControl("stop_actions", this::stopActions));
         }
-
-        // 假人全局（仅 Carpet 加载时显示）
-        if (CarpetIntegration.isLoaded()) {
-            addSection("假人全局");
-            addLeftButton("清理全部假人", this.leftNextY, this.leftWidth, b -> {
-                int n = BotManager.removeAllGlobally();
-                SimulaticaClient.sendFeedback("已清理 " + n + " 个假人。");
-                rebuild();
-            });
-            this.leftNextY += ROW_HEIGHT;
-            addLeftButton("传送全部假人", this.leftNextY, this.leftWidth, b -> {
-                int n = BotManager.teleportAllToPlayer();
-                SimulaticaClient.sendFeedback("已把 " + n + " 个假人传送到玩家位置。");
-            });
-            this.leftNextY += ROW_HEIGHT;
-            addLeftButton("停止全部动作", this.leftNextY, this.leftWidth, b -> BotManager.stopAllActionsGlobally());
-            this.leftNextY += ROW_HEIGHT;
-        }
-
-        this.leftContentHeight = this.leftNextY - LEFT_TOP;
     }
 
-    /** 分区标题独占一行：先留出与上一段的间距，再占 {@link #HEADER_H} 的高度。 */
-    private void addSection(String title) {
-        this.leftNextY += SECTION_GAP;
-        this.leftHeaders.add(new Header(title, this.leftNextY));
-        this.leftNextY += HEADER_H;
-    }
-
-    private Button addLeftButton(String label, int y, int width, Button.OnPress onPress) {
-        return addLeftButton(Component.literal(label), y, width, onPress);
-    }
-
-    private Button addLeftButton(Component label, int y, int width, Button.OnPress onPress) {
-        return addLeftButtonAt(label, PADDING, y, width, onPress);
-    }
-
-    private Button addLeftButtonAt(Component label, int x, int y, int width, Button.OnPress onPress) {
-        Button b = Button.builder(label, onPress).bounds(x, y, width, BTN_H).build();
-        this.leftWidgets.add(b);
-        this.leftBaseY.add(y);
-        addRenderableWidget(b);
-        return b;
-    }
-
-    /** 世界调整一行三格：按左列实际宽度等分，窄屏时自动变窄而不是溢出。 */
-    private void addWorldRow(String l1, String c1, String l2, String c2, String l3, String c3) {
-        int y = this.leftNextY;
-        int w = Math.max(24, (this.leftWidth - 4) / 3);
-        if (l1 != null) {
-            addLeftButtonAt(Component.literal(l1), PADDING, y, w, b -> SimulationCommands.execute(c1));
-        }
-        if (l2 != null) {
-            addLeftButtonAt(Component.literal(l2), PADDING + w + 2, y, w, b -> SimulationCommands.execute(c2));
-        }
-        if (l3 != null) {
-            addLeftButtonAt(Component.literal(l3), PADDING + 2 * (w + 2), y, w, b -> SimulationCommands.execute(c3));
-        }
-        this.leftNextY += ROW_HEIGHT;
-    }
-
-    // ------------------------------------------------------------------
-    // 指令输入栏（固定在底部）
-    // ------------------------------------------------------------------
-    private void buildCommandField() {
-        int x = PADDING;
-        int fieldY = this.height - 40;
-
-        this.commandField = new EditBox(this.font, x, fieldY, Math.max(20, this.leftWidth - CMD_BTN_W - 4), 18,
-                Component.literal(""));
-        this.commandField.setHint(Component.literal("/指令"));
-        this.commandField.setMaxLength(256);
-        clearTabState();
-        addRenderableWidget(this.commandField);
-
-        addRenderableWidget(Button.builder(Component.literal("发送"),
-                        button -> {
-                            String command = this.commandField.getValue().trim();
-                            if (!command.isEmpty()) {
-                                SimulationCommands.execute(command);
-                                this.commandField.setValue("");
-                            }
-                        }).bounds(x + this.leftWidth - CMD_BTN_W, fieldY - 1, CMD_BTN_W, BTN_H).build());
-    }
-
-    // ------------------------------------------------------------------
-    // 右列：单个投影列表
-    // ------------------------------------------------------------------
-    private void buildPlacementList() {
-        // 两个按钮从右往左排，保证任何宽度下都右对齐且互不重叠
-        int rowX = Math.max(this.listX, this.listX + this.listWidth - ROW_BTN_W);
-        int cfgX = Math.max(this.listX, rowX - 4 - CFG_BTN_W);
-
-        for (SchematicPlacement placement : this.placements) {
-            Button config = Button.builder(Component.literal("配置"),
-                            button -> Minecraft.getInstance().gui.setScreen(new PlacementConfigScreen(placement)))
-                    .bounds(cfgX, 0, CFG_BTN_W, BTN_H).build();
-            this.configButtons.add(addRenderableWidget(config));
-
-            Button row = Button.builder(toggleLabel(placement), button -> {
-                SimulationManager manager = SimulationManager.getInstance();
-                if (manager.isSimulating(placement)) {
-                    manager.stopSimulation(placement);
-                } else {
-                    manager.startSimulation(placement);
+    private List<Entry> entries() {
+        List<Entry> rows = new ArrayList<>();
+        switch (this.page) {
+            case PROJECTIONS -> {
+                for (SchematicPlacement p : this.placements) {
+                    rows.add(new Entry(p.getName(), () -> placementStatus(p) + "  " + p.getName(), List.of(
+                            dynamic(() -> tr(SimulationManager.getInstance().isSimulating(p) ? "stop" : "start"), () -> {
+                                if (SimulationManager.getInstance().isSimulating(p)) SimulationManager.getInstance().stopSimulation(p);
+                                else SimulationManager.getInstance().startSimulation(p);
+                            }, () -> p.getSchematic() != null, "", tr("start"), tr("stop")),
+                            botControl("tab.bots", () -> this.mc.gui.setScreen(new PlacementConfigScreen(p, this))))));
                 }
-                button.setMessage(toggleLabel(placement));
-            }).bounds(rowX, 0, ROW_BTN_W, BTN_H).build();
-            this.placementButtons.add(addRenderableWidget(row));
+            }
+            case GENERAL -> {
+                rows.add(row("tps_hud", dynamic(() -> tr(SimulaticaConfigs.TPS_HUD.getBooleanValue() ? "on" : "off"),
+                        () -> SimulaticaConfigs.TPS_HUD.setBooleanValue(!SimulaticaConfigs.TPS_HUD.getBooleanValue()),
+                        () -> true, "", tr("on"), tr("off"))));
+                rows.add(row("tps_multiline", dynamic(() -> tr(SimulaticaConfigs.TPS_MULTILINE.getBooleanValue() ? "on" : "off"),
+                        () -> SimulaticaConfigs.TPS_MULTILINE.setBooleanValue(!SimulaticaConfigs.TPS_MULTILINE.getBooleanValue()),
+                        () -> true, "", tr("on"), tr("off"))));
+                rows.add(row("absorption", dynamic(() -> tr(SimulationManager.getInstance().isItemAbsorption() ? "on" : "off"),
+                        () -> SimulationManager.getInstance().setItemAbsorption(null), () -> true, "", tr("on"), tr("off"))));
+                rows.add(row("purge", control("clear", () -> {
+                    int removed = SimulationManager.getInstance().purgeEscapedEntities();
+                    SimulaticaClient.sendFeedback(tr("purged", removed));
+                })));
+            }
+            case WORLD -> {
+                rows.add(row("time", command("day", "/time set day"), command("noon", "/time set noon"),
+                        command("night", "/time set night"), command("midnight", "/time set midnight")));
+                rows.add(row("weather", command("clear_weather", "/weather clear"), command("rain", "/weather rain"), command("thunder", "/weather thunder")));
+                rows.add(row("difficulty", command("peaceful", "/difficulty peaceful"), command("easy", "/difficulty easy"),
+                        command("normal", "/difficulty normal"), command("hard", "/difficulty hard")));
+            }
+            case COUNTERS -> {
+                rows.add(row("counter_values", control("view", () -> HopperCounter.formatAll().forEach(SimulaticaClient::sendFeedback))));
+                rows.add(row("counter_reset", control("reset", () -> { HopperCounter.resetAll(); SimulaticaClient.sendFeedback(tr("counters_reset")); })));
+            }
+            case BOTS -> {
+                for (SchematicPlacement p : this.placementsForBots()) {
+                    for (BotManager.Bot bot : BotManager.botsOf(p)) rows.add(botRow(p, bot));
+                }
+            }
+            case ACTIONS -> {
+                String[] keys = {"attack", "use", "jump"};
+                String[] types = {"ATTACK", "USE", "JUMP"};
+                for (int i = 0; i < keys.length; i++) {
+                    int slot = i;
+                    rows.add(row(keys[i], dynamic(() -> intervalText(this.intervals[slot]), () -> {
+                        int index = 0;
+                        while (index < INTERVALS.length - 1 && INTERVALS[index] != this.intervals[slot]) index++;
+                        this.intervals[slot] = INTERVALS[(index + 1) % INTERVALS.length];
+                        BotManager.actionAllInterval(this.placement, types[slot], this.intervals[slot]);
+                    }, this::hasBots, "", tr("off"), tr("hold"), tr("ticks", 20))));
+                }
+                String[] moves = {"sneak", "sprint", "forward"};
+                for (int i = 0; i < moves.length; i++) {
+                    int slot = i;
+                    rows.add(row(moves[i], dynamic(() -> tr(this.movement[slot] ? "on" : "off"), () -> {
+                        this.movement[slot] = !this.movement[slot];
+                        if (slot == 0) BotManager.setSneakingAll(this.placement, this.movement[slot]);
+                        else if (slot == 1) BotManager.setSprintingAll(this.placement, this.movement[slot]);
+                        else BotManager.setForwardAll(this.placement, this.movement[slot] ? 1 : 0);
+                    }, this::hasBots, "", tr("on"), tr("off"))));
+                }
+                rows.add(row("single_actions", once("attack_once", "ATTACK"), once("use_once", "USE"), once("drop", "DROP_ITEM"), once("swap", "SWAP_HANDS")));
+                rows.add(row("all_actions", dynamic(() -> tr("stop"), this::stopActions, this::hasBots, "")));
+            }
         }
+        return rows;
     }
 
-    private void rebuild() {
-        this.clearWidgets();
-        this.init();
+    private Entry row(String key, Control... controls) {
+        return new Entry(tr(key), () -> tr(key), List.of(controls));
     }
 
-    @Override
-    public boolean charTyped(net.minecraft.client.input.CharacterEvent event) {
-        if (WorkshopManager.isActive()) { WorkshopManager.requestReturn(); return true; }
-        return super.charTyped(event);
+    private String placementStatus(SchematicPlacement p) {
+        SimulationManager manager = SimulationManager.getInstance();
+        if (!manager.isSimulating(p)) return tr("stopped");
+        var bridges = manager.getSimulations(p);
+        return tr(bridges == null || bridges.isEmpty() ? "pending" : "running");
+    }
+
+    private Control command(String key, String command) {
+        return control(key, () -> SimulationCommands.execute(command));
+    }
+
+    private Control once(String key, String action) {
+        return dynamic(() -> tr(key), () -> BotManager.actionAll(this.placement, action, false), this::hasBots, "");
+    }
+
+    private boolean hasBots() { return CarpetIntegration.isLoaded() && !BotManager.botsOf(this.placement).isEmpty(); }
+    private String intervalText(int interval) { return interval == 0 ? tr("off") : interval < 0 ? tr("hold") : tr("ticks", interval); }
+
+    private List<SchematicPlacement> placementsForBots() {
+        return this.placement == null ? this.placements : List.of(this.placement);
+    }
+
+    private Entry botRow(SchematicPlacement p, BotManager.Bot bot) {
+        String name = this.placement == null ? p.getName() + " / " + bot.name() : bot.name();
+        List<Control> controls = List.of(
+                control("inventory", () -> this.mc.gui.setScreen(new BotInventoryScreen(bot.player()))),
+                control("teleport", () -> BotManager.teleportToPlayer(bot)),
+                dynamic(() -> tr("mode", tr("mode." + bot.player().gameMode.getGameModeForPlayer().getName())), () -> {
+                    GameType[] modes = {GameType.SURVIVAL, GameType.CREATIVE, GameType.ADVENTURE, GameType.SPECTATOR};
+                    bot.player().setGameMode(modes[(bot.player().gameMode.getGameModeForPlayer().ordinal() + 1) % modes.length]);
+                }, () -> true, "", tr("mode", tr("mode.survival")), tr("mode", tr("mode.creative")),
+                        tr("mode", tr("mode.adventure")), tr("mode", tr("mode.spectator"))),
+                control("remove", () -> BotManager.remove(p, bot)));
+        return new Entry(name, () -> name, controls);
+    }
+
+    private void spawnBot() {
+        int index = BotManager.botsOf(this.placement).size() + 1;
+        String name;
+        List<String> names = BotManager.allBots().stream().map(BotManager.Bot::name).toList();
+        do { name = "Bot" + index++; } while (names.contains(name));
+        BotManager.Bot bot = BotManager.spawn(this.placement, name, GameType.CREATIVE);
+        SimulaticaClient.sendFeedback(bot == null ? tr("spawn_hint") : tr("spawned", name));
+    }
+
+    private void stopActions() {
+        if (this.placement == null) BotManager.stopAllActionsGlobally(); else BotManager.stopAllActions(this.placement);
+        java.util.Arrays.fill(this.intervals, 0);
+        java.util.Arrays.fill(this.movement, false);
+    }
+
+    private List<Object> currentDataStamp() {
+        List<Object> stamp = new ArrayList<>();
+        for (SchematicPlacement p : DataManager.getSchematicPlacementManager().getAllSchematicsPlacements()) {
+            stamp.add(p); stamp.add(p.getName()); stamp.addAll(BotManager.botsOf(p));
+        }
+        return stamp;
     }
 
     @Override
     public void tick() {
-        if (WorkshopManager.isActive()) WorkshopManager.requestReturn();
-        else super.tick();
-    }
-
-    private void startAllPlacements() {
-        for (SchematicPlacement placement : this.placements) {
-            SimulationManager.getInstance().startSimulation(placement);
-        }
-        refreshPlacementButtons();
-    }
-
-    private void refreshPlacementButtons() {
-        for (int i = 0; i < this.placementButtons.size(); i++) {
-            this.placementButtons.get(i).setMessage(toggleLabel(this.placements.get(i)));
-        }
-    }
-
-    private static Component absorbLabel() {
-        return Component.literal("掉落物吸收：" + (SimulationManager.getInstance().isItemAbsorption() ? "开" : "关"));
-    }
-
-    private static Component toggleLabel(SchematicPlacement placement) {
-        return Component.literal(SimulationManager.getInstance().isSimulating(placement) ? "停止" : "启动");
-    }
-
-    // ------------------------------------------------------------------
-    // 滚动布局
-    // ------------------------------------------------------------------
-    private static final int LIST_TOP = LEFT_TOP + HEADER_H;
-    private static final int LIST_BOTTOM_MARGIN = 40;
-
-    private int leftViewportHeight() {
-        return Math.max(1, this.leftBottom - LEFT_TOP);
-    }
-
-    private int maxLeftScroll() {
-        return Math.max(0, this.leftContentHeight - leftViewportHeight());
-    }
-
-    private void layoutLeft() {
-        int top = LEFT_TOP;
-        int bottom = this.leftBottom;
-        for (int i = 0; i < this.leftWidgets.size(); i++) {
-            Button w = this.leftWidgets.get(i);
-            int y = this.leftBaseY.get(i) - this.leftScroll;
-            w.setY(y);
-            // 只要有一点点露在可视区内就照画（绘制时会按同一个裁剪区裁掉露出去的部分），
-            // 这样滚动是平滑滑入滑出；整块跳变会很难看。
-            boolean shown = y + BTN_H > top && y < bottom;
-            w.visible = shown;
-            w.active = shown;
-        }
-    }
-
-    private int visibleRows() {
-        return Math.max(1, (this.height - LIST_BOTTOM_MARGIN - LIST_TOP) / ROW_HEIGHT);
-    }
-
-    private int maxScroll() {
-        return Math.max(0, this.placements.size() - visibleRows());
-    }
-
-    private void layoutRows() {
-        int visible = visibleRows();
-        for (int i = 0; i < this.placementButtons.size(); i++) {
-            Button row = this.placementButtons.get(i);
-            int slot = i - this.scrollOffset;
-            boolean shown = slot >= 0 && slot < visible;
-            row.visible = shown;
-            row.active = shown;
-            if (shown) {
-                row.setY(LIST_TOP + slot * ROW_HEIGHT + 1);
-            }
-            this.configButtons.get(i).visible = shown;
-            this.configButtons.get(i).active = shown;
-            if (shown) {
-                this.configButtons.get(i).setY(LIST_TOP + slot * ROW_HEIGHT + 1);
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // 鼠标交互（滚轮 + 滑块拖拽）
-    // ------------------------------------------------------------------
-    @Override
-    public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
-        // 候选列表在最上层：滚轮落在它身上时只滚它，不再穿透到下面的列
-        if (insideSuggest(mouseX, mouseY)) {
-            int max = suggestMaxScroll();
-            if (max > 0) {
-                this.tabScroll = Math.max(0, Math.min(max,
-                        this.tabScroll - (int) Math.signum(scrollY)));
-            }
-            return true;
-        }
-
-        double wheel = Math.signum(scrollY);
-        // 右列（投影列表）
-        if (mouseX >= this.listX && maxScroll() > 0) {
-            this.scrollOffset = Math.max(0, Math.min(maxScroll(), this.scrollOffset - (int) wheel));
-            layoutRows();
-            return true;
-        }
-        // 左列
-        if (mouseX < this.listX && maxLeftScroll() > 0) {
-            this.leftScroll = Math.max(0, Math.min(maxLeftScroll(), this.leftScroll - (int) wheel * ROW_HEIGHT));
-            layoutLeft();
-            return true;
-        }
-        return super.mouseScrolled(mouseX, mouseY, scrollX, scrollY);
+        List<Object> stamp = currentDataStamp();
+        if (!stamp.equals(this.dataStamp)) initGui();
+        for (int i = 0; i < this.toolbarButtons.size(); i++) this.toolbarButtons.get(i).setEnabled(this.toolbarControls.get(i).enabled().getAsBoolean());
     }
 
     @Override
-    public Optional<GuiEventListener> getChildAt(double mouseX, double mouseY) {
-        for (GuiEventListener child : this.children()) {
-            if (this.leftWidgets.contains(child)
-                    && (mouseX < 0 || mouseX >= this.listX || mouseY < LEFT_TOP || mouseY >= this.leftBottom)) {
-                continue;
-            }
-            if (child.isMouseOver(mouseX, mouseY)) {
-                return Optional.of(child);
-            }
-        }
-        return Optional.empty();
+    protected void drawTitle(GuiContext ctx, int mouseX, int mouseY, float partialTicks) {
+        int available = this.width - PADDING * 2 - (this.modSwitchWidget == null ? 0 : 160);
+        ctx.drawString(this.font, ellipsis(this.title, available), PADDING, 10, COLOR_TEXT);
     }
 
     @Override
-    public boolean mouseClicked(MouseButtonEvent event, boolean hasActiveButton) {
-        if (WorkshopManager.isActive()) { WorkshopManager.requestReturn(); return true; }
-        if (event.button() == 0) {
-            int mx = (int) event.x();
-            int my = (int) event.y();
-            if (clickSuggestion(mx, my)) {
-                return true;
-            }
-            if (hitLeftScrollbar(mx, my)) {
-                this.draggingLeft = true;
-                dragLeft(my);
-                return true;
-            }
-            if (hitRightScrollbar(mx, my)) {
-                this.draggingRight = true;
-                dragRight(my);
-                return true;
-            }
+    public void drawContents(GuiContext ctx, int mouseX, int mouseY, float partialTicks) {
+        boolean covered = insideSuggest(mouseX, mouseY) || switcherAt(mouseX, mouseY);
+        ctx.enableScissor(PADDING, this.contentTop, this.width - PADDING, this.contentTop + this.content.totalHeight());
+        this.content.drawContents(ctx, covered ? -1 : mouseX, covered ? -1 : mouseY, partialTicks);
+        ctx.disableScissor();
+        if (this.content.getCurrentEntries().isEmpty()) {
+            String empty = this.page == Page.PROJECTIONS ? "no_placements" : this.page == Page.BOTS ? "no_bots" : "no_matches";
+            if (this.content.search.hasFilter()) empty = "no_matches";
+            ctx.drawString(this.font, ellipsis(tr(empty), this.width - 2 * PADDING - 10), PADDING + 4, this.contentTop + 27, COLOR_DIM);
         }
-        return super.mouseClicked(event, hasActiveButton);
+        if (this.commandField != null) {
+            this.commandField.extractRenderState(ctx.getGuiGraphics(), mouseX, mouseY, partialTicks);
+        }
     }
 
     @Override
-    public boolean mouseDragged(MouseButtonEvent event, double dragX, double dragY) {
-        if (this.draggingLeft) {
-            dragLeft((int) event.y());
+    public void extractRenderState(GuiGraphicsExtractor extractor, int mouseX, int mouseY, float partialTicks) {
+        super.extractRenderState(extractor, mouseX, mouseY, partialTicks);
+        if (suggestVisible()) drawSuggestionList(extractor, mouseX, mouseY);
+    }
+
+    @Override
+    protected void drawHoveredWidget(GuiContext ctx, int mouseX, int mouseY) {
+        if (!insideSuggest(mouseX, mouseY) && !switcherAt(mouseX, mouseY)) this.content.drawHover(ctx, mouseX, mouseY);
+        for (int i = 0; i < this.toolbarButtons.size(); i++) {
+            ButtonGeneric button = this.toolbarButtons.get(i);
+            Control control = this.toolbarControls.get(i);
+            if (!control.enabled().getAsBoolean() && !control.hint().isEmpty()
+                    && mouseX >= button.getX() && mouseX < button.getX() + button.getWidth()
+                    && mouseY >= button.getY() && mouseY < button.getY() + button.getHeight())
+                ctx.renderTooltip(this.font, Component.literal(control.hint()), mouseX, mouseY);
+        }
+        super.drawHoveredWidget(ctx, mouseX, mouseY);
+    }
+
+    private boolean switcherAt(double x, double y) {
+        return this.modSwitchWidget != null && this.modSwitchWidget.isMouseOver((int) x, (int) y);
+    }
+
+    private String ellipsis(String text, int width) {
+        if (this.font.width(text) <= width) return text;
+        return this.font.plainSubstrByWidth(text, Math.max(0, width - this.font.width("…"))) + "…";
+    }
+
+    private void sendCommand() {
+        String command = this.commandField.getValue().trim();
+        if (!command.isEmpty()) { SimulationCommands.execute(command); this.commandField.setValue(""); clearTabState(); }
+    }
+
+    @Override
+    public boolean onMouseClicked(MouseButtonEvent click, boolean doubleClick) {
+        if (switcherAt(click.x(), click.y())) {
+            clearTabState();
+            if (this.commandField != null) this.commandField.setFocused(false);
+            this.content.search.unfocus();
+            return this.modSwitchWidget.onMouseClicked(click, doubleClick);
+        }
+        if (click.input() == 0 && clickSuggestion((int) click.x(), (int) click.y())) return true;
+        if (this.commandField != null) {
+            boolean commandClick = this.commandField.mouseClicked(click, doubleClick);
+            if (commandClick) { clearTabState(); this.content.search.unfocus(); return true; }
+            clearTabState();
+        }
+        if (super.onMouseClicked(click, doubleClick)) return true;
+        return this.content.onMouseClicked(click, doubleClick);
+    }
+
+    @Override
+    public boolean onMouseReleased(MouseButtonEvent click) {
+        this.content.onMouseReleased(click);
+        return super.onMouseReleased(click);
+    }
+
+    @Override
+    public boolean onMouseScrolled(double x, double y, double horizontal, double vertical) {
+        if (switcherAt(x, y)) {
+            this.modSwitchWidget.onMouseScrolled(x, y, horizontal, vertical);
             return true;
         }
-        if (this.draggingRight) {
-            dragRight((int) event.y());
+        if (insideSuggest(x, y)) {
+            this.tabScroll = Math.max(0, Math.min(suggestMaxScroll(), this.tabScroll - (int) Math.signum(vertical)));
             return true;
         }
-        return super.mouseDragged(event, dragX, dragY);
+        return this.content.onMouseScrolled(x, y, horizontal, vertical);
     }
 
     @Override
-    public boolean mouseReleased(MouseButtonEvent event) {
-        this.draggingLeft = false;
-        this.draggingRight = false;
-        return super.mouseReleased(event);
+    public boolean onKeyTyped(KeyEvent event) {
+        if (this.commandField != null && this.commandField.isFocused()) {
+            if (event.key() == InputConstants.KEY_TAB) { onTabComplete(); return true; }
+            if (event.key() == InputConstants.KEY_RETURN || event.key() == InputConstants.KEY_NUMPADENTER) { sendCommand(); return true; }
+            if (event.key() == InputConstants.KEY_ESCAPE) {
+                if (suggestVisible()) { clearTabState(); return true; }
+                this.commandField.setFocused(false);
+            } else { clearTabState(); return this.commandField.keyPressed(event); }
+        }
+        if (event.key() == InputConstants.KEY_ESCAPE && this.placement != null) { closeGui(true); return true; }
+        if (event.key() != InputConstants.KEY_ESCAPE && super.onKeyTyped(event)) return true;
+        if (this.content.onKeyTyped(event)) return true;
+        return event.key() == InputConstants.KEY_ESCAPE && super.onKeyTyped(event);
     }
 
-    // ------------------------------------------------------------------
-    // 指令栏 TAB 补齐（像原版：命令名/参数补全、多候选循环、唯一候选直接补全）
-    // ------------------------------------------------------------------
     @Override
-    public boolean keyPressed(KeyEvent event) {
-        if (WorkshopManager.isActive()) { WorkshopManager.requestReturn(); return true; }
-        if (event.key() == InputConstants.KEY_TAB
-                && this.commandField != null
-                && this.commandField.isFocused()) {
-            onTabComplete();
-            return true;
-        }
-        // 非 TAB 按键（输入/删除/移动光标）→ 补全候选失效
+    public boolean onCharTyped(CharacterEvent event) {
         clearTabState();
-        return super.keyPressed(event);
+        if (this.commandField != null && this.commandField.isFocused()) return this.commandField.charTyped(event);
+        return super.onCharTyped(event) || this.content.onCharTyped(event);
+    }
+
+    /** The native list owns filtering, wheel scrolling, and scrollbar dragging. */
+    private final class ControlsList extends WidgetListBase<Entry, ControlRow> {
+        private final List<Entry> entries;
+        private final Search search;
+        private final int labelWidth;
+        private final int height;
+
+        ControlsList(int x, int y, int width, int height, List<Entry> entries) {
+            super(x, y, width, height, null);
+            this.entries = entries;
+            this.height = height;
+            int actionsWidth = entries.stream().mapToInt(e -> e.controls().stream().mapToInt(c -> c.width() + GAP).sum()).max().orElse(0);
+            this.labelWidth = page == Page.PROJECTIONS || page == Page.BOTS
+                    ? Math.max(70, width - 20 - actionsWidth) : Math.min(180, Math.max(70, (width - 20) / 3));
+            this.search = new Search(x + 2, y + 4, width - 14);
+            this.widgetSearchBar = this.search;
+            this.browserEntriesOffsetY = 21;
+            this.allowKeyboardNavigation = true;
+        }
+
+        int totalHeight() { return this.height; }
+        void restore(ListState state) {
+            this.search.restore(state.search(), state.open());
+            refreshEntries();
+            getScrollbar().setValue(state.scroll());
+            reCreateListEntryWidgets();
+        }
+        @Override protected Collection<Entry> getAllEntries() { return this.entries; }
+        @Override protected List<String> getEntryStringsForFilter(Entry entry) { return List.of(entry.search().toLowerCase(Locale.ROOT)); }
+        @Override protected int getBrowserEntryHeightFor(Entry entry) {
+            return rowHeight(entry, this.browserEntryWidth, this.labelWidth);
+        }
+        @Override protected ControlRow createListEntryWidget(int x, int y, int index, boolean odd, Entry entry) {
+            return new ControlRow(x, y, this.browserEntryWidth, getBrowserEntryHeightFor(entry), entry, index, this.labelWidth);
+        }
+        @Override public boolean onMouseClicked(MouseButtonEvent click, boolean doubleClick) {
+            if (click.y() < this.posY || click.y() >= this.posY + this.browserHeight || click.x() < this.posX || click.x() >= this.posX + this.browserWidth) return false;
+            return super.onMouseClicked(click, doubleClick);
+        }
+        void drawHover(GuiContext ctx, int x, int y) {
+            if (this.hoveredWidget != null) this.hoveredWidget.postRenderHovered(ctx, x, y, false);
+        }
+    }
+
+    private static final class Search extends WidgetSearchBar {
+        Search(int x, int y, int width) { super(x, y, width, 16, 0, MaLiLibIcons.SEARCH, LeftRight.LEFT); }
+        String text() { return this.searchBox.getValue(); }
+        void unfocus() { this.searchBox.setFocused(false); }
+        void restore(String text, boolean open) { this.searchBox.setValue(text); setSearchOpen(open); unfocus(); }
+    }
+
+    private int rowHeight(Entry entry, int width, int labelWidth) {
+        int controlsWidth = entry.controls().stream().mapToInt(c -> c.width() + GAP).sum();
+        boolean stacked = controlsWidth > width - labelWidth - GAP;
+        int x = stacked ? 4 : labelWidth;
+        int y = stacked ? 16 : 2;
+        for (Control control : entry.controls()) {
+            int w = Math.min(control.width(), width - 8);
+            if (x > 4 && x + w > width - 4) { x = 4; y += BTN_H + GAP; }
+            x += w + GAP;
+        }
+        return y + BTN_H + 3;
+    }
+
+    private final class ControlRow extends WidgetListEntryBase<Entry> {
+        private final List<ButtonGeneric> buttons = new ArrayList<>();
+        private final int textWidth;
+        ControlRow(int x, int y, int width, int height, Entry entry, int index, int labelWidth) {
+            super(x, y, width, height, entry, index);
+            int controlsWidth = entry.controls().stream().mapToInt(c -> c.width() + GAP).sum();
+            boolean stacked = controlsWidth > width - labelWidth - GAP;
+            this.textWidth = stacked ? width - 8 : labelWidth - 8;
+            int bx = stacked ? x + 4 : x + labelWidth;
+            int by = stacked ? y + 16 : y + 2;
+            for (Control control : entry.controls()) {
+                int w = Math.min(control.width(), width - 8);
+                if (bx > x + 4 && bx + w > x + width - 4) { bx = x + 4; by += BTN_H + GAP; }
+                ButtonGeneric button = new ButtonGeneric(bx, by, w, BTN_H, control.text().get());
+                if (!control.hint().isEmpty()) button.setHoverStrings(control.hint());
+                this.buttons.add(addButton(button, (b, mouseButton) -> {
+                    if (mouseButton == 0 && control.enabled().getAsBoolean()) control.run().run();
+                }));
+                bx += w + GAP;
+            }
+        }
+        @Override public void render(GuiContext ctx, int mouseX, int mouseY, boolean selected) {
+            ctx.fill(this.x, this.y, this.x + this.width, this.y + this.height, (this.listIndex & 1) == 0 ? 0x40202020 : 0x60303030);
+            for (int i = 0; i < this.buttons.size(); i++) {
+                Control control = this.entry.controls().get(i);
+                this.buttons.get(i).setDisplayString(control.text().get());
+                this.buttons.get(i).setEnabled(control.enabled().getAsBoolean());
+            }
+            ctx.drawString(SimulaticaMenuScreen.this.font, ellipsis(this.entry.label().get(), this.textWidth), this.x + 4, this.y + 6, COLOR_TEXT);
+            super.render(ctx, mouseX, mouseY, selected);
+        }
+        @Override public void postRenderHovered(GuiContext ctx, int mouseX, int mouseY, boolean selected) {
+            super.postRenderHovered(ctx, mouseX, mouseY, selected);
+            for (int i = 0; i < this.buttons.size(); i++) {
+                ButtonGeneric button = this.buttons.get(i);
+                Control control = this.entry.controls().get(i);
+                if (!control.enabled().getAsBoolean() && !control.hint().isEmpty()
+                        && mouseX >= button.getX() && mouseX < button.getX() + button.getWidth()
+                        && mouseY >= button.getY() && mouseY < button.getY() + button.getHeight())
+                    ctx.renderTooltip(SimulaticaMenuScreen.this.font, Component.literal(control.hint()), mouseX, mouseY);
+            }
+            if (SimulaticaMenuScreen.this.font.width(this.entry.label().get()) > this.textWidth
+                    && mouseX < this.x + this.textWidth + 4 && mouseY < this.y + 16)
+                ctx.renderTooltip(SimulaticaMenuScreen.this.font, Component.literal(this.entry.label().get()), mouseX, mouseY);
+        }
     }
 
     private void onTabComplete() {
-        String value = this.commandField.getValue();
+        int request = ++this.completionRequest;
+        GuiTextFieldGeneric field = this.commandField;
+        String value = field.getValue();
         int cursor = this.commandField.getCursorPosition();
         String prefix = value.substring(0, cursor);
 
@@ -540,6 +626,7 @@ public final class SimulaticaMenuScreen extends Screen {
         SimulationCommands.suggestModCommands(prefix, prefix.length()).thenAccept(suggestions ->
                 Minecraft.getInstance().execute(() -> {
                     // 等待期间用户又输入了 → 这次结果作废
+                    if (request != this.completionRequest || field != this.commandField || this.mc.gui.screen() != this) return;
                     String now = this.commandField.getValue();
                     int caret = Math.min(this.commandField.getCursorPosition(), now.length());
                     if (!now.substring(0, caret).equals(prefix)) {
@@ -584,7 +671,7 @@ public final class SimulaticaMenuScreen extends Screen {
 
     /** 候选列表的底边 Y（指令栏上方 4px）。 */
     private int suggestionBottom() {
-        return this.height - 44;
+        return this.commandField.getY() - 4;
     }
 
     /** 候选列表当前是否显示。 */
@@ -594,11 +681,11 @@ public final class SimulaticaMenuScreen extends Screen {
 
     /** 候选列表画几行（最多 {@link #SUGGEST_MAX} 行，行数固定，滚轮滚动时高度不跳）。 */
     private int suggestRows() {
-        return Math.min(this.tabCandidates.size(), SUGGEST_MAX);
+        return Math.min(this.tabCandidates.size(), Math.min(SUGGEST_MAX, Math.max(1, (suggestionBottom() - 28) / SUGGEST_ROW)));
     }
 
     private int suggestMaxScroll() {
-        return Math.max(0, this.tabCandidates.size() - SUGGEST_MAX);
+        return Math.max(0, this.tabCandidates.size() - suggestRows());
     }
 
     private int suggestTop() {
@@ -606,7 +693,7 @@ public final class SimulaticaMenuScreen extends Screen {
     }
 
     private int suggestWidth() {
-        return Math.max(40, this.leftWidth - 50);
+        return Math.min(this.commandField.getWidth(), 360);
     }
 
     private boolean insideSuggest(double mx, double my) {
@@ -642,8 +729,8 @@ public final class SimulaticaMenuScreen extends Screen {
     private void ensureTabCursorVisible() {
         if (this.tabCursor < this.tabScroll) {
             this.tabScroll = this.tabCursor;
-        } else if (this.tabCursor >= this.tabScroll + SUGGEST_MAX) {
-            this.tabScroll = this.tabCursor - SUGGEST_MAX + 1;
+        } else if (this.tabCursor >= this.tabScroll + suggestRows()) {
+            this.tabScroll = this.tabCursor - suggestRows() + 1;
         }
         this.tabScroll = Math.max(0, Math.min(this.tabScroll, suggestMaxScroll()));
     }
@@ -674,7 +761,7 @@ public final class SimulaticaMenuScreen extends Screen {
         int max = suggestMaxScroll();
         if (max > 0) {
             int track = bottom - top;
-            int thumb = Math.max(12, track * SUGGEST_MAX / this.tabCandidates.size());
+            int thumb = Math.max(12, track * suggestRows() / this.tabCandidates.size());
             int thumbTop = top + (track - thumb) * this.tabScroll / max;
             extractor.fill(x + width - 3, top, x + width, bottom, COLOR_TRACK);
             extractor.fill(x + width - 3, thumbTop, x + width, thumbTop + thumb, COLOR_THUMB);
@@ -696,6 +783,7 @@ public final class SimulaticaMenuScreen extends Screen {
     }
 
     private void clearTabState() {
+        ++this.completionRequest;
         this.tabCandidates = List.of();
         this.tabBase = null;
         this.tabSuffix = "";
@@ -704,157 +792,4 @@ public final class SimulaticaMenuScreen extends Screen {
         this.tabCursor = 0;
     }
 
-    private int leftScrollbarX() {
-        return PADDING + this.leftWidth + 4;
-    }
-
-    private int rightScrollbarX() {
-        return this.width - PADDING - SCROLLBAR_WIDTH;
-    }
-
-    private boolean hitLeftScrollbar(int mx, int my) {
-        return maxLeftScroll() > 0
-                && mx >= leftScrollbarX() && mx <= leftScrollbarX() + SCROLLBAR_WIDTH + 4
-                && my >= LEFT_TOP && my <= this.leftBottom;
-    }
-
-    private boolean hitRightScrollbar(int mx, int my) {
-        return maxScroll() > 0
-                && mx >= rightScrollbarX() && mx <= rightScrollbarX() + SCROLLBAR_WIDTH + 4
-                && my >= LIST_TOP && my <= this.height - LIST_BOTTOM_MARGIN;
-    }
-
-    private void dragLeft(int mouseY) {
-        int max = maxLeftScroll();
-        if (max <= 0) {
-            return;
-        }
-        int top = LEFT_TOP;
-        int bottom = this.leftBottom;
-        int track = bottom - top;
-        int thumb = Math.max(20, leftViewportHeight() * track / Math.max(1, this.leftContentHeight));
-        int travel = track - thumb;
-        double ratio = (mouseY - top - thumb / 2.0) / Math.max(1, travel);
-        this.leftScroll = Math.max(0, Math.min(max, (int) Math.round(ratio * max)));
-        layoutLeft();
-    }
-
-    private void dragRight(int mouseY) {
-        int max = maxScroll();
-        if (max <= 0) {
-            return;
-        }
-        int top = LIST_TOP;
-        int bottom = this.height - LIST_BOTTOM_MARGIN;
-        int track = bottom - top;
-        int thumb = Math.max(20, visibleRows() * track / Math.max(1, this.placements.size()));
-        int travel = track - thumb;
-        double ratio = (mouseY - top - thumb / 2.0) / Math.max(1, travel);
-        this.scrollOffset = Math.max(0, Math.min(max, (int) Math.round(ratio * max)));
-        layoutRows();
-    }
-
-    // ------------------------------------------------------------------
-    // 渲染
-    // ------------------------------------------------------------------
-    @Override
-    public void extractRenderState(GuiGraphicsExtractor extractor, int mouseX, int mouseY, float partialTick) {
-        this.extractTransparentBackground(extractor);
-
-        // 左列按钮自己带裁剪区绘制。控件不像文字那样自动受 scissor 影响，所以必须在这里
-        // 手动包一层，才能让只露出一半的按钮被正确裁掉、滚动时平滑滑入滑出。
-        // 被候选列表盖住的控件这一帧按「鼠标不在上面」渲染：悬停是每帧按坐标重算的，
-        // 不这么做的话鼠标明明在候选列表上，底下的按钮却会跟着高亮。
-        extractor.enableScissor(0, LEFT_TOP, this.listX, this.leftBottom);
-        for (Button button : this.leftWidgets) {
-            if (button.visible) {
-                boolean covered = suggestCovers(button.getX(), button.getY(),
-                        button.getWidth(), button.getHeight());
-                button.extractRenderState(extractor, covered ? -1 : mouseX, covered ? -1 : mouseY, partialTick);
-            }
-        }
-        extractor.disableScissor();
-
-        // 其余控件（指令栏、发送、右列按钮）按原插入顺序绘制，不裁剪
-        for (var child : this.children()) {
-            if (child instanceof AbstractWidget widget && !this.leftWidgets.contains(widget)) {
-                boolean covered = suggestCovers(widget.getX(), widget.getY(),
-                        widget.getWidth(), widget.getHeight());
-                widget.extractRenderState(extractor, covered ? -1 : mouseX, covered ? -1 : mouseY, partialTick);
-            } else if (child instanceof Renderable renderable && !this.leftWidgets.contains(renderable)) {
-                renderable.extractRenderState(extractor, mouseX, mouseY, partialTick);
-            }
-        }
-
-        SimulationManager manager = SimulationManager.getInstance();
-        extractor.text(this.font, this.title, this.width / 2 - this.font.width(this.title) / 2, 12, COLOR_TEXT);
-
-        String status = "活动模拟 " + manager.getActiveCount()
-                + " · 等待启动 " + manager.getPendingCount()
-                + " · 投影总数 " + this.placements.size();
-        extractor.text(this.font, status, this.width / 2 - this.font.width(status) / 2, 28, COLOR_DIM);
-
-        // 左列：标题随内容滚动（用 scissor 裁剪）
-        extractor.enableScissor(0, LEFT_TOP, this.listX, this.leftBottom);
-        for (Header header : this.leftHeaders) {
-            extractor.text(this.font, header.text(), PADDING, header.baseY() - this.leftScroll, COLOR_HEADER);
-        }
-        extractor.disableScissor();
-
-        extractor.text(this.font, "模拟世界指令", PADDING, this.height - 40 - 12, COLOR_HEADER);
-        extractor.text(this.font, "单个投影（滚轮翻页）", this.listX, LEFT_TOP, COLOR_HEADER);
-
-        if (this.placements.isEmpty()) {
-            extractor.text(this.font, "没有已加载的投影放置", this.listX, LIST_TOP + 4, COLOR_DIM);
-        } else {
-            extractor.enableScissor(this.listX, LIST_TOP, this.listX + this.listWidth, this.height - LIST_BOTTOM_MARGIN);
-            int rowX = Math.max(this.listX, this.listX + this.listWidth - ROW_BTN_W);
-            int cfgX = Math.max(this.listX, rowX - 4 - CFG_BTN_W);
-            int lineMax = Math.max(0, cfgX - (this.listX + 2) - 4);
-            int visible = visibleRows();
-            for (int slot = 0; slot < visible; slot++) {
-                int index = slot + this.scrollOffset;
-                if (index >= this.placements.size()) {
-                    break;
-                }
-                boolean running = manager.isSimulating(this.placements.get(index));
-                // 整行一起截断：状态圆点也算进宽度。先拼再截，窄屏时圆点不会顶到「配置」按钮。
-                String line = this.font.plainSubstrByWidth(
-                        (running ? "● " : "○ ") + this.placements.get(index).getName(), lineMax);
-                extractor.text(this.font, line, this.listX + 2, LIST_TOP + slot * ROW_HEIGHT + 7,
-                        running ? 0xFF55FF55 : COLOR_DIM);
-            }
-            extractor.disableScissor();
-        }
-
-        // 滑块
-        drawScrollbar(extractor, leftScrollbarX(), LEFT_TOP, this.leftBottom,
-                this.leftScroll, maxLeftScroll(), leftViewportHeight(), Math.max(1, this.leftContentHeight));
-        drawScrollbar(extractor, rightScrollbarX(), LIST_TOP, this.height - LIST_BOTTOM_MARGIN,
-                this.scrollOffset * ROW_HEIGHT, maxScroll() * ROW_HEIGHT,
-                visibleRows() * ROW_HEIGHT, Math.max(1, this.placements.size() * ROW_HEIGHT));
-
-        // 指令补全候选列表（TAB 后显示，鼠标点击/滚轮选取）
-        if (suggestVisible()) {
-            drawSuggestionList(extractor, mouseX, mouseY);
-        }
-    }
-
-    private void drawScrollbar(GuiGraphicsExtractor extractor, int x, int top, int bottom,
-                               int scrollPx, int maxScrollPx, int viewportPx, int contentPx) {
-        if (maxScrollPx <= 0 || bottom <= top) {
-            return;
-        }
-        int track = bottom - top;
-        int thumb = Math.max(20, viewportPx * track / contentPx);
-        int travel = track - thumb;
-        int thumbTop = top + travel * scrollPx / maxScrollPx;
-        extractor.fill(x, top, x + SCROLLBAR_WIDTH, bottom, COLOR_TRACK);
-        extractor.fill(x, thumbTop, x + SCROLLBAR_WIDTH, thumbTop + thumb, COLOR_THUMB);
-    }
-
-    @Override
-    public boolean isPauseScreen() {
-        return false;
-    }
 }

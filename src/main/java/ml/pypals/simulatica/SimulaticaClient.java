@@ -83,6 +83,9 @@ public class SimulaticaClient implements ClientModInitializer {
         registerTickEvent();
         registerCommands();
         registerShutdown();
+        // 登记进 malilib 的配置界面切换下拉框（Tweakeroo / Litematica / ... 那一列）。
+        // 必须在客户端初始化时做一次，malilib 不会自己发现 Simulatica。
+        ml.pypals.simulatica.gui.SimulaticaConfigScreen.register();
         Simulatica.LOGGER.info("Client initialised.");
     }
 
