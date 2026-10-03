@@ -1,0 +1,80 @@
+// Opt-in real-client regression; never included in the release JAR.
+apply from: new File(gradle.startParameter.currentDir, 'regression/background.init.gradle')
+def remoteProcess
+gradle.projectsEvaluated {
+    def project = gradle.rootProject
+    def game = project.file('D:/Games/Minecraft/.minecraft/versions/26.2-test')
+    def output = project.file('build/placement-regression')
+    def testMods = new File(output, 'mods')
+    def remote = new File(game, 'simulatica/regression/remote-' + System.currentTimeMillis())
+    def socket = new java.net.ServerSocket(0, 0, java.net.InetAddress.getLoopbackAddress())
+    def port = socket.localPort
+    socket.close()
+    project.layout.buildDirectory.set(output)
+    project.sourceSets.main.java.srcDir(project.file('regression/java'))
+    project.tasks.named('processResources') {
+        doLast {
+            def file = new File(destinationDir, 'fabric.mod.json')
+            def json = new groovy.json.JsonSlurper().parse(file)
+            json.entrypoints.client.add('ml.pypals.simulatica.PlacementRegression')
+            file.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(json))
+        }
+    }
+    project.extensions.getByName('loom').runs.named('client') {
+        runDir game.absolutePath
+        // Avoid loading the release Simulatica JAR alongside development classes.
+        vmArg '-Dfabric.modsFolder=' + testMods.absolutePath
+        vmArg '-Dsimulatica.regression.port=' + port
+        vmArg '-Dsimulatica.regression.output=' + output.absolutePath
+        vmArg '-Dsimulatica.regression.serverLog=' + new File(output, 'remote.log').absolutePath
+        programArgs '--username', 'SimRegression', '--width', '960', '--height', '600'
+    }
+    project.tasks.named('runClient') {
+        doFirst {
+            output.mkdirs()
+            new File(output, 'result.txt').delete()
+            testMods.mkdirs()
+            // Choose active mods by identity; Litematica/malilib come from Gradle dependencies.
+            def selected = [:]
+            new File(game, 'mods').listFiles().findAll { it.name.endsWith('.jar') }.each { jar ->
+                new java.util.zip.ZipFile(jar).withCloseable { zip ->
+                    def entry = zip.getEntry('fabric.mod.json')
+                    if (entry != null) {
+                        def metadata = new groovy.json.JsonSlurper().parse(zip.getInputStream(entry))
+                        if (metadata.id in ['fabric-api', 'carpet', 'minihud']) {
+                            if (selected.containsKey(metadata.id)) throw new GradleException('Multiple active versions of ' + metadata.id)
+                            selected[metadata.id] = jar
+                        }
+                    }
+                }
+            }
+            if (!selected.containsKey('fabric-api')) throw new GradleException('Test instance has no Fabric API')
+            // Only this generated directory is cleared; no instance mods are changed.
+            testMods.listFiles().findAll { it.name.endsWith('.jar') }.each { it.delete() }
+            selected.values().each { jar -> java.nio.file.Files.copy(jar.toPath(), new File(testMods, jar.name).toPath()) }
+            def options = new File(game, 'options.txt')
+            if (options.exists()) options.text = options.text.replaceAll('(?m)^soundCategory_master:.*$', 'soundCategory_master:0.0')
+            remote.mkdirs()
+            new File(remote, 'eula.txt').text = 'eula=true\n'
+            new File(remote, 'server.properties').text = "server-ip=127.0.0.1\nserver-port=${port}\nonline-mode=false\nenforce-secure-profile=false\ngamemode=creative\nview-distance=3\nsimulation-distance=3\nspawn-protection=0\nlevel-name=regression\n"
+            def launcher = project.javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }.get()
+            def jar = new File(System.getProperty('user.home'), '.gradle/caches/fabric-loom/26.2/minecraft-server.jar')
+            if (!jar.exists()) throw new GradleException('Cached Minecraft 26.2 server JAR missing')
+            remoteProcess = new ProcessBuilder(launcher.executablePath.asFile.absolutePath, '-Xmx1G', '-jar', jar.absolutePath, 'nogui')
+                    .directory(remote).redirectErrorStream(true).redirectOutput(new File(output, 'remote.log')).start()
+        }
+        doLast {
+            def result = new File(output, 'result.txt')
+            if (!result.exists() || !result.text.startsWith('PASS:')) throw new GradleException('Placement regression failed: ' + (result.exists() ? result.text : 'missing result'))
+        }
+    }
+}
+gradle.buildFinished {
+    if (remoteProcess != null && remoteProcess.isAlive()) {
+        try {
+            remoteProcess.outputStream.write('stop\n'.getBytes('UTF-8'))
+            remoteProcess.outputStream.flush()
+            if (!remoteProcess.waitFor(15, java.util.concurrent.TimeUnit.SECONDS)) remoteProcess.destroy()
+        } catch (Exception ignored) { remoteProcess.destroy() }
+    }
+}

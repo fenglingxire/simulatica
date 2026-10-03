@@ -3,6 +3,7 @@ package ml.pypals.simulatica.workshop;
 import com.mojang.serialization.JsonOps;
 import ml.pypals.simulatica.Simulatica;
 import ml.pypals.simulatica.mixin.workshop.WorkshopMinecraftAccessor;
+import ml.pypals.simulatica.mixin.workshop.WorkshopDataManagerAccessor;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.multiplayer.*;
@@ -33,6 +34,7 @@ public final class WorkshopSession {
     private Connection localConnection;
     private boolean returning;
     private DisconnectionDetails localFailure;
+    private final boolean sourceCanSave = WorkshopDataManagerAccessor.simulatica$canSave();
 
     private WorkshopSession(Minecraft mc) { remote = new RemoteSession(mc); }
     public static WorkshopSession current() { return current; }
@@ -199,6 +201,7 @@ public final class WorkshopSession {
             successful &= attempt(session.remote::restoreForShutdown, "restore source namespace on shutdown");
             session.remote.connection().disconnect(Component.literal("Client closing"));
         } finally {
+            WorkshopDataManagerAccessor.simulatica$canSave(session.sourceCanSave);
             current = null;
             WorkshopMetadata.clear();
             if (successful && session.server != null && session.server.isShutdown()) deleteDisposable(session.server);
@@ -265,6 +268,9 @@ public final class WorkshopSession {
             }
             catch (Throwable failure) { handoffFailure = combine(handoffFailure, failure); }
         } finally {
+            // The still-loaded placements belong to the source; a subsequent world load
+            // may replace them and establish its own save state after current is cleared.
+            WorkshopDataManagerAccessor.simulatica$canSave(sourceCanSave);
             current = null;
             attempt(WorkshopMetadata::clear, "clear workshop metadata");
         }

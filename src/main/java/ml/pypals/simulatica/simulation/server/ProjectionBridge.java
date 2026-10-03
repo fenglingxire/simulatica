@@ -143,40 +143,123 @@ public final class ProjectionBridge {
         this.viewer = viewer;
     }
 
-    /**
-     * Carries the running simulation to a new position instead of rebuilding it there.
-     *
-     * <p>Blocks are moved in whichever direction keeps a source cell from being overwritten before
-     * it is read incase that the old and new footprints overlaps.
-     * Ticks and block events are collected across the whole region before any of them are rescheduled.</p>
-     */
-    void translate(SimulationRegion target) {
-        BlockPos delta = target.worldMin().subtract(this.region.worldMin());
-        if (delta.equals(BlockPos.ZERO)) {
-            this.region = target;
-            return;
+    private record MovedBlock(BlockState state, @Nullable CompoundTag tag) {}
+    private record MovedEntity(Entity entity, net.minecraft.world.phys.Vec3 position) {}
+
+    /** Snapshot the entire placement before changing any source or destination. */
+    static void translateAll(java.util.Map<ProjectionBridge, SimulationRegion> moves) {
+        if (moves.isEmpty()) return;
+        ProjectionBridge first = moves.keySet().iterator().next();
+        SimulationLevel level = first.level;
+        SimulationRegion firstTarget = moves.get(first);
+        BlockPos delta = firstTarget.toSim(firstTarget.worldMin())
+                .subtract(first.region.toSim(first.region.worldMin()));
+        List<SimulationRegion> sources = moves.keySet().stream().map(ProjectionBridge::region).toList();
+        List<SimulationRegion> targets = List.copyOf(moves.values());
+        moves.forEach((bridge, target) -> {
+            if (bridge.level != level || !bridge.region.dimension().equals(target.dimension())
+                    || !target.toSim(target.worldMin()).subtract(bridge.region.toSim(bridge.region.worldMin())).equals(delta)
+                    || !target.worldMax().subtract(target.worldMin()).equals(bridge.region.worldMax().subtract(bridge.region.worldMin()))) {
+                throw new IllegalArgumentException("Regions must share one level and translation");
+            }
+        });
+        if (delta.equals(BlockPos.ZERO)) return;
+
+        java.util.Map<BlockPos, MovedBlock> blocks = new java.util.LinkedHashMap<>();
+        java.util.Map<UUID, MovedEntity> entities = new java.util.LinkedHashMap<>();
+        LongSet chunks = new LongOpenHashSet();
+        for (ProjectionBridge bridge : moves.keySet()) {
+            for (BlockPos world : BlockPos.betweenClosed(bridge.region.worldMin(), bridge.region.worldMax())) {
+                BlockPos from = bridge.region.toSim(world);
+                if (blocks.containsKey(from)) continue;
+                BlockState state = level.getBlockState(from);
+                BlockEntity entity = level.getBlockEntity(from);
+                blocks.put(from, new MovedBlock(state, entity == null ? null : entity.saveWithFullMetadata(level.registryAccess())));
+            }
+            for (Entity entity : bridge.entities()) {
+                if (!(entity instanceof EnderDragonPart)) {
+                    entities.putIfAbsent(entity.getUUID(), new MovedEntity(entity, entity.position()));
+                }
+            }
         }
-
-        SimulationRegion source = this.region;
-        List<Entity> entities = entities();
-
-        moveBlocks(source, target, delta);
-        moveTicks(source, delta);
-        moveBlockEvents(source, delta);
-        clearVacated(source, target);
-
-        for (Entity entity : entities) {
-            if (entity instanceof EnderDragonPart) continue;
-            entity.snapTo(entity.getX() + delta.getX(), entity.getY() + delta.getY(), entity.getZ() + delta.getZ(),
-                    entity.getYRot(), entity.getXRot());
+        java.util.stream.Stream.concat(sources.stream(), targets.stream()).forEach(region -> {
+            ChunkPos min = region.simChunkMin(), max = region.simChunkMax();
+            for (int x = min.x(); x <= max.x(); x++) for (int z = min.z(); z <= max.z(); z++) chunks.add(ChunkPos.pack(x, z));
+        });
+        List<ScheduledTick<Block>> blockTicks = new ArrayList<>();
+        List<ScheduledTick<Fluid>> fluidTicks = new ArrayList<>();
+        for (long key : chunks) {
+            LevelChunk chunk = level.getChunk(ChunkPos.getX(key), ChunkPos.getZ(key));
+            @SuppressWarnings("unchecked")
+            LevelChunkTicks<Block> bt = (LevelChunkTicks<Block>) chunk.getBlockTicks();
+            @SuppressWarnings("unchecked")
+            LevelChunkTicks<Fluid> ft = (LevelChunkTicks<Fluid>) chunk.getFluidTicks();
+            bt.getAll().filter(tick -> contains(sources, tick.pos())).forEach(blockTicks::add);
+            ft.getAll().filter(tick -> contains(sources, tick.pos())).forEach(fluidTicks::add);
         }
+        var queue = ((ServerLevelBlockEventsAccessor) level).simulatica$blockEvents();
+        List<BlockEventData> events = queue.stream().filter(event -> contains(sources, event.pos())).toList();
 
-        this.region = target;
-        this.animated.clear();
-        this.dirtyBlockEntities.clear();
-        this.dirtyRenderChunks.clear();
+        // Nothing above mutates the world. Remove old queues before rescheduling so destinations
+        // inside a different source cannot be picked up a second time or suppress a newer tick.
+        for (long key : chunks) {
+            LevelChunk chunk = level.getChunk(ChunkPos.getX(key), ChunkPos.getZ(key));
+            ((LevelChunkTicks<Block>) chunk.getBlockTicks()).removeIf(tick -> contains(sources, tick.pos()) || contains(targets, tick.pos()));
+            ((LevelChunkTicks<Fluid>) chunk.getFluidTicks()).removeIf(tick -> contains(sources, tick.pos()) || contains(targets, tick.pos()));
+        }
+        queue.removeIf(event -> contains(sources, event.pos()) || contains(targets, event.pos()));
+        for (BlockPos from : blocks.keySet()) {
+            if (!contains(targets, from)) {
+                level.removeBlockEntity(from);
+                level.setBlock(from, Blocks.AIR.defaultBlockState(), Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
+            }
+        }
+        blocks.forEach((from, saved) -> {
+            BlockPos to = from.offset(delta);
+            // Even an unchanged block state may have an old destination block entity.
+            level.removeBlockEntity(to);
+            level.setBlock(to, saved.state(), Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
+            if (saved.tag() != null) {
+                BlockEntity entity = BlockEntity.loadStatic(to, saved.state(), saved.tag(), level.registryAccess());
+                if (entity != null) level.setBlockEntity(entity);
+            }
+        });
+        for (ScheduledTick<Block> tick : blockTicks) level.getBlockTicks().schedule(new ScheduledTick<>(
+                tick.type(), tick.pos().offset(delta), tick.triggerTick(), tick.priority(), tick.subTickOrder()));
+        for (ScheduledTick<Fluid> tick : fluidTicks) level.getFluidTicks().schedule(new ScheduledTick<>(
+                tick.type(), tick.pos().offset(delta), tick.triggerTick(), tick.priority(), tick.subTickOrder()));
+        for (BlockEventData event : events) queue.add(new BlockEventData(
+                event.pos().offset(delta), event.block(), event.paramA(), event.paramB()));
+        for (MovedEntity saved : entities.values()) {
+            Entity entity = saved.entity();
+            var position = saved.position();
+            entity.snapTo(position.x + delta.getX(), position.y + delta.getY(), position.z + delta.getZ(), entity.getYRot(), entity.getXRot());
+        }
+        java.util.Map<ProjectionBridge, SimulationRegion> old = new java.util.LinkedHashMap<>();
+        moves.forEach((bridge, target) -> {
+            old.put(bridge, bridge.region);
+            bridge.region = target;
+            bridge.animated.clear();
+            bridge.dirtyBlocks.clear();
+            bridge.dirtyBlockEntities.clear();
+            bridge.dirtyRenderChunks.clear();
+        });
+        // Neighbour updates only see the completed move, including all other sub-regions.
+        moves.forEach((bridge, target) -> bridge.refreshBoundary(old.get(bridge), target));
+    }
 
-        refreshBoundary(source, target);
+    private static boolean contains(List<SimulationRegion> regions, BlockPos pos) {
+        return regions.stream().anyMatch(region -> region.containsSim(pos));
+    }
+
+    /** Rebuilding from the schematic must not retain the old machine's queued updates. */
+    public void discardScheduledUpdates() {
+        BlockPos min = region.toSim(region.worldMin()), max = region.toSim(region.worldMax());
+        var bounds = new net.minecraft.world.level.levelgen.structure.BoundingBox(
+                min.getX(), min.getY(), min.getZ(), max.getX(), max.getY(), max.getZ());
+        level.getBlockTicks().clearArea(bounds);
+        level.getFluidTicks().clearArea(bounds);
+        ((ServerLevelBlockEventsAccessor) level).simulatica$blockEvents().removeIf(event -> region.containsSim(event.pos()));
     }
 
     /**
@@ -232,101 +315,6 @@ public final class ProjectionBridge {
                 }
             }
         }
-    }
-
-    private void moveBlocks(SimulationRegion source, SimulationRegion target, BlockPos delta) {
-        BlockPos min = source.worldMin();
-        BlockPos max = source.worldMax();
-        int spanX = max.getX() - min.getX() + 1;
-        int spanY = max.getY() - min.getY() + 1;
-        int spanZ = max.getZ() - min.getZ() + 1;
-
-        for (int i = 0; i < spanX; i++) {
-            int x = delta.getX() > 0 ? max.getX() - i : min.getX() + i;
-            for (int j = 0; j < spanY; j++) {
-                int y = delta.getY() > 0 ? max.getY() - j : min.getY() + j;
-                for (int k = 0; k < spanZ; k++) {
-                    int z = delta.getZ() > 0 ? max.getZ() - k : min.getZ() + k;
-
-                    BlockPos world = new BlockPos(x, y, z);
-                    BlockPos from = source.toSim(world);
-                    BlockPos to = target.toSim(world.offset(delta));
-
-                    BlockState state = this.level.getBlockState(from);
-                    BlockEntity blockEntity = state.hasBlockEntity() ? this.level.getBlockEntity(from) : null;
-                    CompoundTag tag = blockEntity != null
-                            ? blockEntity.saveWithFullMetadata(this.level.registryAccess()) : null;
-
-                    this.level.setBlock(to, state, Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
-                    if (tag != null) {
-                        BlockEntity moved = BlockEntity.loadStatic(to, state, tag, this.level.registryAccess());
-                        if (moved != null) {
-                            this.level.setBlockEntity(moved);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private void clearVacated(SimulationRegion source, SimulationRegion target) {
-        BlockState air = Blocks.AIR.defaultBlockState();
-        for (BlockPos world : BlockPos.betweenClosed(source.worldMin(), source.worldMax())) {
-            BlockPos sim = source.toSim(world);
-            if (target.containsSim(sim) || this.level.getBlockState(sim).isAir()) {
-                continue;
-            }
-            this.level.setBlock(sim, air, Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
-        }
-    }
-
-    private void moveTicks(SimulationRegion source, BlockPos delta) {
-        List<ScheduledTick<Block>> blocks = new ArrayList<>();
-        List<ScheduledTick<Fluid>> fluids = new ArrayList<>();
-
-        ChunkPos min = source.simChunkMin();
-        ChunkPos max = source.simChunkMax();
-        for (int cx = min.x(); cx <= max.x(); cx++) {
-            for (int cz = min.z(); cz <= max.z(); cz++) {
-                LevelChunk chunk = this.level.getChunk(cx, cz);
-
-                @SuppressWarnings("unchecked")
-                LevelChunkTicks<Block> blockTicks = (LevelChunkTicks<Block>) chunk.getBlockTicks();
-                blockTicks.getAll().filter(tick -> source.containsSim(tick.pos())).forEach(blocks::add);
-                blockTicks.removeIf(tick -> source.containsSim(tick.pos()));
-
-                @SuppressWarnings("unchecked")
-                LevelChunkTicks<Fluid> fluidTicks = (LevelChunkTicks<Fluid>) chunk.getFluidTicks();
-                fluidTicks.getAll().filter(tick -> source.containsSim(tick.pos())).forEach(fluids::add);
-                fluidTicks.removeIf(tick -> source.containsSim(tick.pos()));
-            }
-        }
-
-        for (ScheduledTick<Block> tick : blocks) {
-            this.level.getBlockTicks().schedule(new ScheduledTick<>(
-                    tick.type(), tick.pos().offset(delta), tick.triggerTick(), tick.priority(), tick.subTickOrder()));
-        }
-        for (ScheduledTick<Fluid> tick : fluids) {
-            this.level.getFluidTicks().schedule(new ScheduledTick<>(
-                    tick.type(), tick.pos().offset(delta), tick.triggerTick(), tick.priority(), tick.subTickOrder()));
-        }
-    }
-
-    private void moveBlockEvents(SimulationRegion source, BlockPos delta) {
-        var queue = ((ServerLevelBlockEventsAccessor) this.level).simulatica$blockEvents();
-        if (queue.isEmpty()) {
-            return;
-        }
-
-        List<BlockEventData> moved = new ArrayList<>();
-        queue.removeIf(event -> {
-            if (!source.containsSim(event.pos())) {
-                return false;
-            }
-            moved.add(new BlockEventData(event.pos().offset(delta), event.block(), event.paramA(), event.paramB()));
-            return true;
-        });
-        queue.addAll(moved);
     }
 
     /**

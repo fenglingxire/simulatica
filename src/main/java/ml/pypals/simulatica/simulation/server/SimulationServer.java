@@ -458,17 +458,21 @@ public final class SimulationServer extends MinecraftServer {
      * <p>The destination has to be loaded and ticking before anything is carried over. </p>
      */
     public void moveRegion(ProjectionBridge bridge, BlockPos worldMin, BlockPos worldMax) {
-        SimulationRegion source = bridge.region();
-        SimulationRegion target = new SimulationRegion(source.dimension(), worldMin, worldMax, 0, 0);
-        SimulationLevel level = this.levelFor(target.dimension());
+        moveRegions(java.util.Map.of(bridge, new SimulationRegion(bridge.region().dimension(), worldMin, worldMax, 0, 0)));
+    }
 
-        this.force(level, target);
-        this.pumpUntilTicking(level, target.simChunkMin(), target.simChunkMax());
-
-        bridge.translate(target);
-        bridge.setViewer(SimulationViewer.create(this, level, target.simBounds().getCenter(), bridge::onPacket));
-
-        this.release(level, source);
+    /** Prepare every destination, then migrate the placement from a single snapshot. */
+    public void moveRegions(java.util.Map<ProjectionBridge, SimulationRegion> moves) {
+        java.util.Map<ProjectionBridge, SimulationRegion> sources = new java.util.LinkedHashMap<>();
+        moves.forEach((bridge, target) -> {
+            sources.put(bridge, bridge.region());
+            force(bridge.level(), target);
+            pumpUntilTicking(bridge.level(), target.simChunkMin(), target.simChunkMax());
+        });
+        ProjectionBridge.translateAll(moves);
+        moves.forEach((bridge, target) -> bridge.setViewer(
+                SimulationViewer.create(this, bridge.level(), target.simBounds().getCenter(), bridge::onPacket)));
+        sources.forEach((bridge, source) -> release(bridge.level(), source));
     }
 
     private void force(SimulationLevel level, SimulationRegion region) {

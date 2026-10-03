@@ -48,6 +48,16 @@ public final class BotManager {
         private final String name;
         private final ServerPlayer player;
         private final ClientMannequin avatar;
+        /**
+         * What the UI last asked of each action in {@link #ACTIONS}: 0 = off, -1 = continuous,
+         * N = every N simulation ticks. Carpet's action pack cannot be queried, so this mirrors it.
+         */
+        private final int[] actionModes = new int[ACTIONS.length];
+        /** Interval remembered per action while it is off or continuous. */
+        private final int[] actionIntervals = {20, 20, 20, 20, 20, 20};
+        private Movement movement = Movement.STOP;
+        private boolean sneaking;
+        private boolean sprinting;
 
         Bot(String name, ServerPlayer player, ClientMannequin avatar) {
             this.name = name;
@@ -66,6 +76,81 @@ public final class BotManager {
         public ClientMannequin avatar() {
             return this.avatar;
         }
+
+        public int actionMode(int action) { return this.actionModes[action]; }
+        public int actionInterval(int action) { return this.actionIntervals[action]; }
+        public Movement movement() { return this.movement; }
+        public boolean sneaking() { return this.sneaking; }
+        public boolean sprinting() { return this.sprinting; }
+    }
+
+    /** Carpet action names, in the order the bot config screen lists them. */
+    public static final String[] ACTIONS = {"USE", "ATTACK", "JUMP", "DROP_ITEM", "DROP_STACK", "SWAP_HANDS"};
+
+    public enum Movement {
+        STOP(0, 0), FORWARD(1, 0), BACKWARD(-1, 0), LEFT(0, 1), RIGHT(0, -1);
+        final float forward, strafing;
+        Movement(float forward, float strafing) { this.forward = forward; this.strafing = strafing; }
+    }
+
+    /** Sets one action to off (0), continuous (-1) or every N ticks (N > 0). */
+    public static void setAction(Bot bot, int action, int mode) {
+        bot.actionModes[action] = mode;
+        if (mode > 0) bot.actionIntervals[action] = mode;
+        CarpetIntegration.startInterval(bot.player(), ACTIONS[action], mode);
+    }
+
+    /** Changes the remembered interval; applies it at once if the action is already running on an interval. */
+    public static void setActionInterval(Bot bot, int action, int ticks) {
+        bot.actionIntervals[action] = ticks;
+        if (bot.actionModes[action] > 0) setAction(bot, action, ticks);
+    }
+
+    public static void actionOnce(Bot bot, int action) {
+        CarpetIntegration.startOnce(bot.player(), ACTIONS[action]);
+    }
+
+    public static void setMovement(Bot bot, Movement movement) {
+        bot.movement = movement;
+        CarpetIntegration.setForward(bot.player(), movement.forward);
+        CarpetIntegration.setStrafing(bot.player(), movement.strafing);
+    }
+
+    public static void setSneaking(Bot bot, boolean sneaking) {
+        bot.sneaking = sneaking;
+        CarpetIntegration.setSneaking(bot.player(), sneaking);
+    }
+
+    public static void setSprinting(Bot bot, boolean sprinting) {
+        bot.sprinting = sprinting;
+        CarpetIntegration.setSprinting(bot.player(), sprinting);
+    }
+
+    /** Stops every action and movement; Carpet's stopAll also clears sneaking and sprinting. */
+    public static void stopAll(Bot bot) {
+        CarpetIntegration.stopAll(bot.player());
+        java.util.Arrays.fill(bot.actionModes, 0);
+        bot.movement = Movement.STOP;
+        bot.sneaking = false;
+        bot.sprinting = false;
+    }
+
+    /** Turns the bot to face where the player is looking, without moving it. */
+    public static void copyFacing(Bot bot) {
+        LocalPlayer p = Minecraft.getInstance().player;
+        if (p == null) return;
+        ServerPlayer player = bot.player();
+        player.setYRot(p.getYRot());
+        player.setXRot(p.getXRot());
+        player.setYHeadRot(p.getYRot());
+        player.setYBodyRot(p.getYRot());
+    }
+
+    public static void setFlying(Bot bot, boolean flying) {
+        ServerPlayer player = bot.player();
+        if (flying) player.getAbilities().mayfly = true;
+        player.getAbilities().flying = flying;
+        player.onUpdateAbilities();
     }
 
     /** 在指定投影的模拟世界召唤一个假人，出生在玩家当前位置。 */

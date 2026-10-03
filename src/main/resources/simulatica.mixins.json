@@ -37,6 +37,9 @@
     "simulation.ServerLevelEntityManagerAccessor",
     "simulation.ServerLevelPlayersAccessor",
     "simulation.SimBotTickMixin",
+    "simulation.SimulationTimeCommandMixin",
+    "simulation.SimulationWeatherCommandMixin",
+    "simulation.SimulationDifficultyCommandMixin",
     "simulation.SimPistonMovingBlockEntityAccessor"
   ],
   "injectors": {
@@ -61,6 +64,7 @@
     "workshop.WorkshopConfigurationMetadataMixin",
     "workshop.WorkshopConnectionMetadataMixin",
     "workshop.WorkshopConnectionMixin",
+    "workshop.WorkshopDataManagerAccessor",
     "workshop.WorkshopDownloadedPackAccessor",
     "workshop.WorkshopDownloadedPackMixin",
     "workshop.WorkshopEditedPlacementLifecycleMixin",

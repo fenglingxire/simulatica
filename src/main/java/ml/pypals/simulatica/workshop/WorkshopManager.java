@@ -53,6 +53,10 @@ public final class WorkshopManager {
         select(found.getFirst());
     }
 
+    public static void enter(SchematicPlacement placement) {
+        select(placement);
+    }
+
     private static void select(SchematicPlacement placement) {
         if (isActive() || pending != null) { feedback("simulatica.workshop.already_open"); return; }
         if (placement == null || placement.getSchematic() == null) {

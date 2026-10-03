@@ -18,6 +18,7 @@ import ml.pypals.simulatica.simulation.server.LeftoverStore;
 import ml.pypals.simulatica.simulation.server.ProjectionBridge;
 import ml.pypals.simulatica.simulation.server.SimulationServer;
 import ml.pypals.simulatica.simulation.server.SimulationLevel;
+import ml.pypals.simulatica.simulation.server.SimulationRegion;
 import ml.pypals.simulatica.simulation.server.SimulationClock;
 import ml.pypals.simulatica.counter.HopperCounter;
 import net.minecraft.ChatFormatting;
@@ -70,6 +71,14 @@ public class SimulationManager {
     private final Map<SchematicPlacement, Simulation> active = new LinkedHashMap<>();
 
     private boolean itemAbsorption;
+    private final Map<SchematicPlacement, Boolean> itemAbsorptionOverrides = new LinkedHashMap<>();
+    /** World settings chosen before the placement's simulation world exists; applied when it is created. */
+    private final Map<SchematicPlacement, int[]> pendingWorldSettings = new LinkedHashMap<>();
+
+    public enum WorldSetting { TIME, WEATHER, DIFFICULTY }
+    private static final List<net.minecraft.resources.ResourceKey<net.minecraft.world.clock.ClockTimeMarker>> TIME_MARKERS = List.of(
+            net.minecraft.world.clock.ClockTimeMarkers.DAY, net.minecraft.world.clock.ClockTimeMarkers.NOON,
+            net.minecraft.world.clock.ClockTimeMarkers.NIGHT, net.minecraft.world.clock.ClockTimeMarkers.MIDNIGHT);
     @Nullable private SchematicPlacement lastTpsPlacement;
 
     /**
@@ -91,11 +100,20 @@ public class SimulationManager {
      */
     public boolean setItemAbsorption(@Nullable Boolean enabled) {
         this.itemAbsorption = enabled != null ? enabled : !this.itemAbsorption;
+        itemAbsorptionOverrides.clear();
         return this.itemAbsorption;
     }
 
     public boolean isItemAbsorption() {
         return this.itemAbsorption;
+    }
+
+    public boolean isItemAbsorption(SchematicPlacement placement) {
+        return itemAbsorptionOverrides.getOrDefault(placement, itemAbsorption);
+    }
+
+    public void setItemAbsorption(SchematicPlacement placement, boolean enabled) {
+        itemAbsorptionOverrides.put(placement, enabled);
     }
 
     /**
@@ -107,8 +125,14 @@ public class SimulationManager {
      * removed.</p>
      */
     public int purgeEscapedEntities() {
+        return purgeEscapedEntities(null);
+    }
+
+    public int purgeEscapedEntities(@Nullable SchematicPlacement placement) {
         int removed = 0;
-        Collection<ProjectionBridge> bridges = getAllSimulations();
+        var simulation = placement == null ? null : getSimulations(placement);
+        Collection<ProjectionBridge> bridges = placement == null ? getAllSimulations()
+                : simulation == null ? List.of() : simulation.values();
         Map<SimulationLevel, java.util.Set<java.util.UUID>> visited = new java.util.HashMap<>();
         for (ProjectionBridge bridge : bridges) {
             for (Entity entity : bridge.entities()) {
@@ -139,16 +163,26 @@ public class SimulationManager {
         }
     }
 
-    /**
-     * Where a placement was when its current regions were built, so a move can be undone.
-     *
-     * <p>Only the whole-placement transform. Moving a single sub-region is not covered, and would
-     * leave the overlap in place rather than being reverted.</p>
-     */
-    private record PlacementTransform(BlockPos origin, Rotation rotation, Mirror mirror) {
+    private record SubRegionTransform(BlockPos position, Rotation rotation, Mirror mirror, boolean enabled) {
+    }
+
+    /** Placement and sub-region transforms at the last accepted simulation footprint. */
+    private record PlacementTransform(BlockPos origin, Rotation rotation, Mirror mirror, boolean enabled,
+                                      Map<String, SubRegionTransform> regions) {
 
         static PlacementTransform of(SchematicPlacement placement) {
-            return new PlacementTransform(placement.getOrigin(), placement.getRotation(), placement.getMirror());
+            Map<String, SubRegionTransform> regions = new LinkedHashMap<>();
+            for (SubRegionPlacement region : placement.getAllSubRegionsPlacements()) {
+                regions.put(region.getName(), new SubRegionTransform(region.getPos().immutable(),
+                        region.getRotation(), region.getMirror(), region.isEnabled()));
+            }
+            return new PlacementTransform(placement.getOrigin().immutable(), placement.getRotation(),
+                    placement.getMirror(), placement.isEnabled(), Map.copyOf(regions));
+        }
+
+        boolean sameOrientationAndRegions(PlacementTransform other) {
+            return rotation == other.rotation && mirror == other.mirror && enabled == other.enabled
+                    && regions.equals(other.regions);
         }
 
         void restore(SchematicPlacement placement) {
@@ -160,6 +194,17 @@ public class SimulationManager {
             placement.setOrigin(this.origin, InfoUtils.INFO_MESSAGE_CONSUMER);
             placement.setRotation(this.rotation, null);
             placement.setMirror(this.mirror, null);
+            placement.setEnabled(this.enabled);
+            regions.forEach((name, transform) -> {
+                SubRegionPlacement region = placement.getRelativeSubRegionPlacement(name);
+                if (region == null) return;
+                placement.setSubRegionRotation(name, transform.rotation(), null);
+                placement.setSubRegionMirror(name, transform.mirror(), null);
+                // moveSubRegionTo takes a world position, not a relative offset.
+                BlockPos relative = PositionUtils.getTransformedBlockPos(transform.position(), mirror, rotation);
+                placement.moveSubRegionTo(name, origin.offset(relative), InfoUtils.INFO_MESSAGE_CONSUMER);
+                placement.setSubRegionsEnabledState(transform.enabled(), List.of(region), null);
+            });
         }
     }
 
@@ -190,15 +235,13 @@ public class SimulationManager {
         levels.forEach((placement, level) -> {
             if (!placement.getName().equals(level.projectionName())) {
                 level.setProjectionName(placement.getName());
-                level.clock.setTarget(TpsSettings.get(placement.getName()));
+                level.clock.setTarget(TpsSettings.get(placement));
                 Simulation simulation = active.get(placement);
                 if (simulation != null) simulation.bridges.forEach((name, bridge) -> bridge.setLabel(placement.getName() + "/" + name));
             }
         });
         server.tickSimulation();
-        if (this.itemAbsorption) {
-            absorbItems();
-        }
+        absorbItems();
     }
 
     /**
@@ -225,8 +268,9 @@ public class SimulationManager {
         // Queried on the simulation levels rather than through a bridge's tracked set: that set is
         // clipped to the region box, so a drop resting on the boundary fell outside it and was
         // never absorbed.
-        for (ProjectionBridge bridge : getAllSimulations()) {
-            for (Entity entity : bridge.level().getEntitiesOfClass(Entity.class, reach,
+        for (var entry : levels.entrySet()) {
+            if (!active.containsKey(entry.getKey()) || !isItemAbsorption(entry.getKey())) continue;
+            for (Entity entity : entry.getValue().getEntitiesOfClass(Entity.class, reach,
                     candidate -> !candidate.isRemoved() && !(candidate instanceof Player))) {
                 if (entity instanceof ItemEntity item) {
                     if (item.hasPickUpDelay()) {
@@ -288,12 +332,13 @@ public class SimulationManager {
             SchematicPlacement placement = entry.getKey();
             Simulation simulation = entry.getValue();
             Map<String, RegionBox> current = boxesOf(placement);
+            PlacementTransform transform = PlacementTransform.of(placement);
 
             if (simulation.blockedNotice > 0) {
                 simulation.blockedNotice--;
             }
 
-            if (!current.equals(simulation.boxes)) {
+            if (!current.equals(simulation.boxes) || !transform.equals(simulation.transform)) {
                 if (overlapsAnother(placement, current)) {
                     simulation.transform.restore(placement);
                     noticeBlocked(placement, simulation);
@@ -308,26 +353,37 @@ public class SimulationManager {
                     continue;
                 }
 
-                BlockPos delta = pureTranslation(simulation.boxes, current);
+                BlockPos delta = simulation.transform.sameOrientationAndRegions(transform)
+                        ? pureTranslation(simulation.boxes, current) : null;
                 if (delta != null && !simulation.bridges.isEmpty()) {
                     // Carry the running machine across rather than starting it over.
+                    Map<ProjectionBridge, SimulationRegion> moves = new LinkedHashMap<>();
                     simulation.bridges.forEach((name, bridge) -> {
                         RegionBox box = current.get(name);
                         if (box != null) {
-                            server.moveRegion(bridge, box.min(), box.max());
+                            moves.put(bridge, new SimulationRegion(bridge.region().dimension(), box.min(), box.max(), 0, 0));
                         }
                     });
+                    server.moveRegions(moves);
                     simulation.pushAfterWait = true;
                 } else {
+                    BotManager.removeAll(placement);
+                    SimulationLevel level = levels.get(placement);
+                    if (level != null) discardEntities(level);
                     simulation.bridges.values().forEach(server::detach);
+                    simulation.bridges.values().forEach(ProjectionBridge::discardScheduledUpdates);
                     simulation.bridges.clear();
                     simulation.pushAfterWait = false;
+                    // An earlier rebuild may have been overwritten by the old simulation,
+                    // or captured an intermediate transform while multiple setters ran.
+                    DataManager.getSchematicPlacementManager().markChunksForRebuild(placement);
                 }
 
                 repushNeighbours(placement, simulation.boxes, current);
                 simulation.boxes = current;
-                simulation.transform = PlacementTransform.of(placement);
+                simulation.transform = transform;
                 simulation.settle = SETTLE_TICKS;
+                simulation.waited = 0;
                 simulation.pending = true;
             } else if (simulation.pending) {
                 if (simulation.settle > 0) {
@@ -505,7 +561,13 @@ public class SimulationManager {
     private void attach(SimulationServer server, SchematicPlacement placement, Simulation simulation) {
         var level = levels.computeIfAbsent(placement, key -> {
             var created = server.createProjectionLevel(Minecraft.getInstance().level.dimension(), key.getName());
-            created.clock.setTarget(TpsSettings.get(key.getName()));
+            created.clock.setTarget(TpsSettings.get(key));
+            int[] pending = pendingWorldSettings.remove(key);
+            if (pending != null) {
+                for (WorldSetting setting : WorldSetting.values()) {
+                    if (pending[setting.ordinal()] >= 0) applyWorldSetting(created, setting, pending[setting.ordinal()]);
+                }
+            }
             return created;
         });
         level.clock.suspend();
@@ -528,6 +590,7 @@ public class SimulationManager {
 
     private static Map<String, RegionBox> boxesOf(SchematicPlacement placement) {
         Map<String, RegionBox> result = new LinkedHashMap<>();
+        if (!placement.isEnabled()) return result;
         for (Map.Entry<String, Box> entry :
                 placement.getSubRegionBoxes(SubRegionPlacement.RequiredEnabled.PLACEMENT_ENABLED).entrySet()) {
             Box box = entry.getValue();
@@ -642,18 +705,23 @@ public class SimulationManager {
         SimulationLevel level = levels.remove(placement);
         BotManager.removeAll(placement);
         if (level != null) {
-            WorldSchematic projection = SchematicWorldHandler.getSchematicWorld();
-            List<Entity> entities = new ArrayList<>();
-            level.getAllEntities().forEach(entities::add);
-            for (Entity entity : entities) {
-                if (projection != null) ProjectionBridge.unpublishEntity(projection, entity);
-                entity.discard();
-            }
-            leftovers.removeIf(leftover -> leftover.level() == level);
+            discardEntities(level);
             level.clock.suspend();
         }
         SimulationServer server = SimulationServer.getRunning();
         if (simulation != null && server != null) simulation.bridges.values().forEach(server::detach);
+    }
+
+    private void discardEntities(SimulationLevel level) {
+        WorldSchematic projection = SchematicWorldHandler.getSchematicWorld();
+        List<Entity> entities = new ArrayList<>();
+        level.getAllEntities().forEach(entities::add);
+        for (Entity entity : entities) {
+            if (ml.pypals.simulatica.simulation.server.SimulationViewer.isViewer(entity)) continue;
+            if (projection != null) ProjectionBridge.unpublishEntity(projection, entity);
+            entity.discard();
+        }
+        leftovers.removeIf(leftover -> leftover.level() == level);
     }
 
     /**
@@ -694,6 +762,8 @@ public class SimulationManager {
         }
         this.leftovers.clear();
         this.levels.clear();
+        this.itemAbsorptionOverrides.clear();
+        this.pendingWorldSettings.clear();
         this.lastTpsPlacement = null;
         HopperCounter.clearAll();
     }
@@ -756,13 +826,49 @@ public class SimulationManager {
         return levels.get(placement);
     }
 
+    /**
+     * Time period, weather or difficulty index of the placement's simulation world. A stopped
+     * simulation keeps its world, so this works without running; before the world exists it
+     * reports the value queued for creation, or -1 for the default.
+     */
+    public int worldSetting(SchematicPlacement placement, WorldSetting setting) {
+        SimulationLevel level = levels.get(placement);
+        if (level == null) {
+            int[] pending = pendingWorldSettings.get(placement);
+            return pending == null ? -1 : pending[setting.ordinal()];
+        }
+        return switch (setting) {
+            case TIME -> Math.floorMod(level.getOverworldClockTime(), 24000) / 6000;
+            case WEATHER -> level.getWeatherData().isThundering() ? 2 : level.getWeatherData().isRaining() ? 1 : 0;
+            case DIFFICULTY -> level.getDifficulty().ordinal();
+        };
+    }
+
+    public void setWorldSetting(SchematicPlacement placement, WorldSetting setting, int index) {
+        SimulationLevel level = levels.get(placement);
+        if (level != null) {
+            applyWorldSetting(level, setting, index);
+            return;
+        }
+        int[] pending = pendingWorldSettings.computeIfAbsent(placement, key -> new int[]{-1, -1, -1});
+        pending[setting.ordinal()] = index;
+    }
+
+    private static void applyWorldSetting(SimulationLevel level, WorldSetting setting, int index) {
+        switch (setting) {
+            case TIME -> level.setSimulationTime(TIME_MARKERS.get(index));
+            case WEATHER -> level.setSimulationWeather(index >= 1, index == 2);
+            case DIFFICULTY -> level.setSimulationDifficulty(net.minecraft.world.Difficulty.values()[index]);
+        }
+    }
+
     public void setTps(SchematicPlacement placement, int tps) throws java.io.IOException {
-        TpsSettings.set(placement.getName(), tps);
+        TpsSettings.set(placement, tps);
         if (levels.containsKey(placement)) levels.get(placement).clock.setTarget(tps);
     }
 
     public String describeTps(SchematicPlacement placement) {
-        return placement.getName() + ": 目标 " + TpsSettings.get(placement.getName()) + " TPS";
+        return placement.getName() + ": 目标 " + TpsSettings.get(placement) + " TPS";
     }
 
     public List<String> describeRates() {

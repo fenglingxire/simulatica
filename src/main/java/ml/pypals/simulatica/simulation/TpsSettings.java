@@ -7,11 +7,12 @@ import ml.pypals.simulatica.Simulatica;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.level.storage.LevelResource;
+import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
 
 import java.io.IOException;
 import java.nio.file.*;
 
-/** World identity and exact placement name, without filename sanitizing collisions. */
+/** World identity and placement UUID; existing name-based settings remain readable. */
 public final class TpsSettings {
     private static final Path FILE = FabricLoader.getInstance().getGameDir().resolve("simulatica/tps.json");
     private static JsonObject values;
@@ -49,6 +50,21 @@ public final class TpsSettings {
             Simulatica.LOGGER.warn("[Simulatica] Invalid TPS setting for '{}'; using 20 TPS", name, e);
             return 20;
         }
+    }
+
+    public static int get(SchematicPlacement placement) {
+        if (values == null) reload();
+        String id = "placement-id:" + placement.getHashId();
+        try {
+            JsonObject entries = values.getAsJsonObject(world());
+            return entries != null && entries.has(id) ? get(id) : get(placement.getName());
+        } catch (RuntimeException error) {
+            return get(placement.getName());
+        }
+    }
+
+    public static void set(SchematicPlacement placement, int tps) throws IOException {
+        set("placement-id:" + placement.getHashId(), tps);
     }
 
     public static void set(String name, int tps) throws IOException {

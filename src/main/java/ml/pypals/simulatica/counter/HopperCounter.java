@@ -58,6 +58,24 @@ public final class HopperCounter {
         COUNTERS.values().forEach(colors -> colors.values().forEach(HopperCounter::reset));
     }
 
+    public static void reset(SimulationLevel level) {
+        var colors = COUNTERS.get(level);
+        if (colors != null) colors.values().forEach(HopperCounter::reset);
+    }
+
+    public static List<Component> format(SimulationLevel level) {
+        List<Component> out = new ArrayList<>();
+        var colors = COUNTERS.get(level);
+        if (colors != null) {
+            for (DyeColor color : DyeColor.values()) {
+                var counter = colors.get(color);
+                if (counter != null && counter.total > 0) out.addAll(counter.formatLines());
+            }
+        }
+        if (out.isEmpty()) out.add(Component.literal("尚未统计到任何物品。").withColor(0xFFAAAAAA));
+        return out;
+    }
+
     public static void clearAll() { COUNTERS.clear(); }
 
     public long count(Item item) { return counts.getOrDefault(item, 0L); }

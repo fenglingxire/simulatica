@@ -30,6 +30,7 @@ public final class BotInventoryScreen extends Screen {
     }
 
     private final ServerPlayer bot;
+    private final Screen parent;
     private ItemStack carried = ItemStack.EMPTY;
 
     private int guiLeft;
@@ -37,8 +38,13 @@ public final class BotInventoryScreen extends Screen {
     private int playerTop;
 
     public BotInventoryScreen(ServerPlayer bot) {
+        this(bot, null);
+    }
+
+    public BotInventoryScreen(ServerPlayer bot, Screen parent) {
         super(Component.literal("假人背包 - " + bot.getName().getString()));
         this.bot = bot;
+        this.parent = parent;
     }
 
     private Inventory botInventory() {
@@ -187,7 +193,7 @@ public final class BotInventoryScreen extends Screen {
             }
             this.carried = ItemStack.EMPTY;
         }
-        super.onClose();
+        Minecraft.getInstance().gui.setScreen(this.parent);
     }
 
     private static ItemStack putBack(Inventory inv, ItemStack stack) {

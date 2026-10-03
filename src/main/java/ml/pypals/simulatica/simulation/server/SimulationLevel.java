@@ -5,6 +5,7 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
@@ -12,6 +13,11 @@ import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.util.ProgressListener;
 import net.minecraft.world.TickRateManager;
+import net.minecraft.world.Difficulty;
+import net.minecraft.world.attribute.EnvironmentAttributeSystem;
+import net.minecraft.world.clock.ClockTimeMarker;
+import net.minecraft.world.clock.ServerClockManager;
+import net.minecraft.world.clock.WorldClocks;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import ml.pypals.simulatica.mixin.simulation.LivingEntityDeathSoundInvoker;
@@ -24,6 +30,8 @@ import net.minecraft.world.level.dimension.LevelStem;
 import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.storage.LevelStorageSource;
 import net.minecraft.world.level.storage.ServerLevelData;
+import net.minecraft.world.level.storage.PrimaryLevelData;
+import net.minecraft.world.level.saveddata.WeatherData;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import org.jetbrains.annotations.Nullable;
@@ -48,6 +56,8 @@ public class SimulationLevel extends ServerLevel {
     public final SimulationClock clock = new SimulationClock();
     private final TickRateManager simulationTickRate = new TickRateManager();
     private String projectionName;
+    private ServerClockManager projectionClock;
+    private WeatherData projectionWeather;
     private final java.util.Set<SoundEvent> playedSounds = new java.util.HashSet<>();
     private final java.util.Set<Integer> playedLevelEvents = new java.util.HashSet<>();
 
@@ -77,6 +87,53 @@ public class SimulationLevel extends ServerLevel {
         // Void simulations keep End physics without creating an unrelated dragon arena.
         // Explicitly summoned or schematic dragons remain normal entities.
         setDragonFight(null);
+        projectionClock = getDataStorage().computeIfAbsent(ServerClockManager.TYPE);
+        projectionClock.init(server);
+        projectionWeather = getDataStorage().computeIfAbsent(WeatherData.TYPE);
+        setRainLevel(projectionWeather.isRaining() ? 1 : 0);
+        setThunderLevel(projectionWeather.isThundering() ? 1 : 0);
+        setEnvironmentAttributes(EnvironmentAttributeSystem.builder()
+                .addDefaultLayers(this).build());
+    }
+
+    @Override
+    public ServerClockManager clockManager() {
+        return projectionClock == null ? super.clockManager() : projectionClock;
+    }
+
+    @Override
+    public WeatherData getWeatherData() {
+        return projectionWeather == null ? super.getWeatherData() : projectionWeather;
+    }
+
+    @Override
+    protected void tickTime() {
+        if (projectionClock != null) projectionClock.tick();
+        super.tickTime();
+    }
+
+    public void setSimulationTime(ResourceKey<ClockTimeMarker> marker) {
+        var overworld = registryAccess().lookupOrThrow(Registries.WORLD_CLOCK).getOrThrow(WorldClocks.OVERWORLD);
+        if (!clockManager().moveToTimeMarker(overworld, marker)) {
+            throw new IllegalArgumentException("Unknown time marker: " + marker);
+        }
+    }
+
+    public void setSimulationWeather(boolean rain, boolean thunder) {
+        setSimulationWeather(rain ? 0 : 12000, 12000, rain, thunder);
+    }
+
+    public void setSimulationWeather(int clearTime, int duration, boolean rain, boolean thunder) {
+        var weather = getWeatherData();
+        weather.setClearWeatherTime(clearTime);
+        weather.setRainTime(duration);
+        weather.setThunderTime(duration);
+        weather.setRaining(rain);
+        weather.setThundering(thunder);
+    }
+
+    public void setSimulationDifficulty(Difficulty difficulty) {
+        ((PrimaryLevelData) getLevelData()).setDifficulty(difficulty);
     }
 
     private final List<Consumer<BlockPos>> blockEntityChangeListeners = new ArrayList<>();
